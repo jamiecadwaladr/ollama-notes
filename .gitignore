@@ -1,0 +1,10 @@
+# Build output
+build/
+target/
+ui/dist/
+
+# macOS
+.DS_Store
+
+# Per-machine Claude Code settings
+.claude/settings.local.json

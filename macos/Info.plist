@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Ollama Notes</string>
+	<key>CFBundleDisplayName</key>
+	<string>Ollama Notes</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.ollama-notes</string>
+	<key>CFBundleExecutable</key>
+	<string>Ollama Notes</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Chat with local Ollama models; notes map themselves as you talk.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Ollama on another machine is usually plain http://host:11434 -->
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Ollama Notes connects to the Ollama server set in Settings.</string>
+</dict>
+</plist>
