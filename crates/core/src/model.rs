@@ -59,6 +59,9 @@ pub struct Settings {
     pub api_base: String,
     #[serde(deserialize_with = "lenient")]
     pub api_key: String,
+    /// Let Ollama models search the web and read pages before answering (`websearch`).
+    #[serde(deserialize_with = "lenient")]
+    pub web_search: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -78,6 +81,7 @@ impl Default for Settings {
             provider: Provider::Ollama,
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
+            web_search: true,
             extra: Extra::new(),
         }
     }
@@ -126,6 +130,9 @@ pub struct Message {
     pub node_ids: Option<Vec<String>>,
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The web searches and page reads behind a reply.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub research: Option<Vec<ResearchStep>>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -134,6 +141,49 @@ impl Message {
     pub fn is_streaming(&self) -> bool {
         self.streaming == Some(true)
     }
+}
+
+/// A web search or page read the model made while answering.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ResearchStep {
+    /// "search" or "fetch".
+    #[serde(deserialize_with = "lenient")]
+    pub tool: String,
+    /// The search query, or the page's address.
+    #[serde(deserialize_with = "lenient")]
+    pub input: String,
+    /// The results found, or the page read.
+    #[serde(deserialize_with = "lenient")]
+    pub links: Vec<WebLink>,
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Still running.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub pending: Option<bool>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl ResearchStep {
+    pub fn is_fetch(&self) -> bool {
+        self.tool == "fetch"
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending == Some(true)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebLink {
+    #[serde(deserialize_with = "lenient")]
+    pub title: String,
+    #[serde(deserialize_with = "lenient")]
+    pub url: String,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// Where a note came from: a chat message, or a section of an imported file.
@@ -380,6 +430,9 @@ impl AppState {
             if m.streaming.is_some() {
                 m.streaming = Some(false);
             }
+            for step in m.research.iter_mut().flatten() {
+                step.pending = None;
+            }
         }
     }
 
@@ -487,6 +540,26 @@ mod tests {
         let s = AppState::from_saved(r#"{"chat":[{"id":"1","streaming":true},{"id":"2"}]}"#).unwrap();
         assert_eq!(s.chat[0].streaming, Some(false));
         assert_eq!(s.chat[1].streaming, None);
+    }
+
+    #[test]
+    fn web_search_is_on_unless_turned_off() {
+        assert!(AppState::from_saved("{}").unwrap().settings.web_search);
+        assert!(!AppState::from_saved(r#"{"settings":{"webSearch":false}}"#).unwrap().settings.web_search);
+    }
+
+    #[test]
+    fn research_steps_round_trip() {
+        let json = r#"{"chat":[{"id":"1","research":[{"tool":"search","input":"q","pending":true,"links":[{"title":"T","url":"https://x","rank":1}]},{"tool":"fetch","input":"https://y","error":"not found"}]}]}"#;
+        let s = AppState::from_saved(json).unwrap();
+        let steps = s.chat[0].research.as_deref().unwrap();
+        assert_eq!((steps[0].links[0].url.as_str(), steps[0].pending), ("https://x", None));
+        assert!(steps[1].is_fetch() && steps[1].error.is_some());
+        let back = serde_json::to_value(&s).unwrap();
+        assert_eq!(back["chat"][0]["research"][0]["links"][0]["rank"], 1);
+        assert!(back["chat"][0]["research"][0].get("pending").is_none());
+        let junk = AppState::from_saved(r#"{"chat":[{"id":"1","research":"x"}]}"#).unwrap();
+        assert_eq!(junk.chat[0].research, None);
     }
 
     #[test]

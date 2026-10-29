@@ -6,15 +6,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// The tools an assistant message called, as the model sent them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<Value>,
+    /// The tool whose result a "tool" message is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 impl ChatMessage {
     pub fn new(role: &str, content: impl Into<String>) -> Self {
-        ChatMessage { role: role.into(), content: content.into() }
+        ChatMessage { role: role.into(), content: content.into(), ..ChatMessage::default() }
     }
 }
 
@@ -77,9 +83,24 @@ pub fn error_text(status: u16, body: &str) -> String {
     }
 }
 
-/// The body of a streamed `/api/chat` request.
-pub fn chat_stream_body(model: &str, messages: &[ChatMessage], temperature: f64) -> Value {
-    json!({ "model": model, "messages": messages, "stream": true, "options": { "temperature": temperature } })
+/// The body of a streamed `/api/chat` request: with a context of `num_ctx` tokens instead of the model's default, and
+/// `tools` the model may call.
+pub fn chat_stream_body(
+    model: &str,
+    messages: &[ChatMessage],
+    temperature: f64,
+    num_ctx: Option<u32>,
+    tools: Option<&Value>,
+) -> Value {
+    let mut body =
+        json!({ "model": model, "messages": messages, "stream": true, "options": { "temperature": temperature } });
+    if let Some(n) = num_ctx {
+        body["options"]["num_ctx"] = n.into();
+    }
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
+    body
 }
 
 /// The body of a non-streamed `/api/chat` request for JSON output: constrained by `schema` (Ollama >= 0.5), or plain
@@ -137,6 +158,8 @@ pub struct ChatStream {
     sse: bool,
     pub content: String,
     pub thinking: String,
+    /// The tools the model called (Ollama only), as it sent them.
+    pub tool_calls: Vec<Value>,
     /// The final line (with timing stats) once the reply is done.
     pub done: Option<Value>,
 }
@@ -182,6 +205,9 @@ impl ChatStream {
                     .find_map(|k| m.get(*k).and_then(Value::as_str))
                 {
                     self.thinking.push_str(t);
+                }
+                if let Some(calls) = m.get("tool_calls").and_then(Value::as_array).filter(|_| !self.sse) {
+                    self.tool_calls.extend(calls.iter().cloned());
                 }
             }
             read = true;
@@ -271,6 +297,31 @@ mod tests {
         let mut s = ChatStream::sse();
         let err = s.push(b"data: {\"error\":{\"message\":\"Rate limit reached\",\"code\":429}}\n");
         assert_eq!(err, Err(StreamError::Ollama("Rate limit reached".into())));
+    }
+
+    #[test]
+    fn streams_tool_calls() {
+        let mut s = ChatStream::default();
+        let call =
+            json!({ "id": "call_1", "function": { "index": 0, "name": "web_search", "arguments": { "query": "x" } } });
+        let line = json!({ "message": { "role": "assistant", "content": "", "tool_calls": [call] }, "done": false });
+        s.push(format!("{line}\n{{\"message\":{{\"content\":\"\"}},\"done\":true}}\n").as_bytes()).unwrap();
+        assert_eq!((&s.tool_calls, s.content.as_str()), (&vec![call], ""));
+        assert!(s.is_done());
+    }
+
+    #[test]
+    fn chat_requests() {
+        let tools = json!([{ "type": "function" }]);
+        let msgs = [ChatMessage::new("user", "hi")];
+        let plain = chat_stream_body("m", &msgs, 0.7, None, None);
+        assert_eq!(plain["options"], json!({ "temperature": 0.7 }));
+        assert!(plain.get("tools").is_none());
+        assert_eq!(plain["messages"], json!([{ "role": "user", "content": "hi" }]));
+        let research = chat_stream_body("m", &msgs, 0.7, Some(16384), Some(&tools));
+        assert_eq!((&research["options"]["num_ctx"], &research["tools"]), (&json!(16384), &tools));
+        let answer = ChatMessage { tool_name: Some("web_search".into()), ..ChatMessage::new("tool", "results") };
+        assert_eq!(serde_json::to_value(answer).unwrap()["tool_name"], "web_search");
     }
 
     #[test]

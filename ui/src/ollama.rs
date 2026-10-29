@@ -6,6 +6,7 @@
 use crate::dom::{self, js_error, window};
 use notes_core::ollama::{self as api, ChatMessage, ChatStream, ModelInfo};
 use notes_core::openai;
+use notes_core::websearch::Failure;
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -68,6 +69,16 @@ impl std::fmt::Display for Error {
             Error::Failed(m) => f.write_str(m),
         }
     }
+}
+
+/// A chat request's settings besides its messages. A cloud API only takes the temperature.
+#[derive(Default)]
+pub struct ChatOptions<'a> {
+    pub temperature: f64,
+    /// The context in tokens, instead of the model's default.
+    pub num_ctx: Option<u32>,
+    /// Tools the model may call.
+    pub tools: Option<&'a Value>,
 }
 
 #[derive(Default)]
@@ -206,14 +217,14 @@ impl Ollama {
         &self,
         model: &str,
         messages: &[ChatMessage],
-        temperature: f64,
+        opts: &ChatOptions<'_>,
         abort: &Abort,
         mut on_chunk: impl FnMut(&ChatStream),
     ) -> Result<ChatStream, Error> {
         let (body, mut stream) = if self.is_cloud() {
-            (openai::chat_stream_body(model, messages, temperature), ChatStream::sse())
+            (openai::chat_stream_body(model, messages, opts.temperature), ChatStream::sse())
         } else {
-            (api::chat_stream_body(model, messages, temperature), ChatStream::default())
+            (api::chat_stream_body(model, messages, opts.temperature, opts.num_ctx, opts.tools), ChatStream::default())
         };
         let r = Self::check(self.post(self.path("/api/chat", "/chat/completions"), body, abort).await?).await?;
         let Some(body) = r.body() else { return Ok(stream) };
@@ -235,6 +246,14 @@ impl Ollama {
             }
         }
         Ok(stream)
+    }
+
+    /// A web search or page read through Ollama (`notes_core::websearch`): the reply's text, or why it failed. The
+    /// caller checks `abort` for a Stop.
+    pub async fn web(&self, path: &str, body: &Value, abort: &Abort) -> Result<String, Failure> {
+        let r = self.request(path, Some(body), abort).await.map_err(|e| Failure::unreachable(&e.to_string()))?;
+        let text = text_of(&r).await;
+        if r.ok() { Ok(text) } else { Err(Failure::from_reply(r.status(), &text)) }
     }
 
     /// A non-streamed call that asks for JSON, constrained by `schema`, with fallbacks when the server rejects the

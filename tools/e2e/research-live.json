@@ -1,0 +1,38 @@
+[
+ {
+  "name": "connected to Ollama",
+  "js": "t.ask = async (q) => { t.$('#input').value = q; t.$('#composer').requestSubmit(); await t.until(() => !t.$('#stopBtn').hidden, 5000); await t.until(() => t.$('#stopBtn').hidden, 300000); await t.sleep(600); const s = t.state(); return s.chat[s.chat.length - 1]; }; t.sum = (m) => ({ searches: (m.research || []).map(s => s.tool + ': ' + s.input), worked: (m.research || []).filter(s => !s.error).length, errors: (m.research || []).filter(s => s.error).map(s => s.error), cited: (m.content.match(/\\]\\(https?:/g) || []).length, chars: m.content.length, error: m.error ?? null }); return t.$('#status .status-text').textContent.startsWith('Ollama ·')",
+  "expect": true
+ },
+ {
+  "name": "the small model, web search on, auto-notes off",
+  "js": "const s = t.$('#modelSelect'); s.value = 'qwen3.5:2b'; s.dispatchEvent(new Event('change')); if (t.$('#autoNotes').checked) t.$('#autoNotes').click(); await t.sleep(300); const st = t.state().settings; return [st.model, st.webSearch, st.autoNotes]",
+  "expect": [
+   "qwen3.5:2b",
+   true,
+   false
+  ]
+ },
+ {
+  "name": "a question about something recent: it researches before answering (a page it guesses may not exist)",
+  "js": "const m = t.sum(await t.ask('What was in the latest Ollama release?')); console.info(JSON.stringify(m)); return [m.searches.some(s => s.startsWith('search: ')), m.worked > 0, m.chars > 100, m.error]",
+  "expect": [
+   true,
+   true,
+   true,
+   null
+  ]
+ },
+ {
+  "shot": "live-1"
+ },
+ {
+  "name": "writing that needs no facts: it answers without searching",
+  "js": "const m = t.sum(await t.ask('Write a two-line poem about autumn leaves.')); console.info(JSON.stringify(m)); return [m.searches, m.chars > 20, m.error]",
+  "expect": [
+   [],
+   true,
+   null
+  ]
+ }
+]

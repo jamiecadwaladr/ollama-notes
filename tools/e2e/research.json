@@ -1,0 +1,223 @@
+[
+ {
+  "name": "connected to the stand-in, Web search on",
+  "js": "t.ask = async (q) => { t.$('#input').value = q; t.$('#composer').requestSubmit(); await t.until(() => !t.$('#stopBtn').hidden, 5000); await t.until(() => t.$('#stopBtn').hidden, 60000); await t.sleep(600); const s = t.state(); return s.chat[s.chat.length - 1]; }; t.log = async () => (await (await fetch('/api/log')).json()); t.chats = async () => (await t.log()).filter(r => r.path === '/api/chat' && !r.format); return [t.$('#status .status-text').textContent, t.$('#webSearchToggle').hidden, t.$('#webSearch').checked]",
+  "expect": [
+   "Ollama · 2 models",
+   false,
+   true
+  ]
+ },
+ {
+  "name": "use the model that calls tools",
+  "js": "const s = t.$('#modelSelect'); s.value = 'mock-researcher'; s.dispatchEvent(new Event('change')); await t.sleep(300); return t.state().settings.model",
+  "expect": "mock-researcher"
+ },
+ {
+  "name": "the model searches, reads a page, then answers citing it",
+  "js": "const m = await t.ask('How do Bloom filters avoid false negatives?'); return [m.content, m.thinking, m.error ?? null, m.research.map(s => [s.tool, s.input, s.links.map(l => l.url), s.pending ?? null, s.error ?? null])]",
+  "expect": [
+   "Let me check.\n\nA Bloom filter has no false negatives ([Bloom filter - Wikipedia](https://en.wikipedia.org/wiki/Bloom_filter)).",
+   "Need to search.\n\nFound it.",
+   null,
+   [
+    [
+     "search",
+     "bloom filter false negatives",
+     [
+      "https://en.wikipedia.org/wiki/Bloom_filter",
+      "https://example.com/pds"
+     ],
+     null,
+     null
+    ],
+    [
+     "fetch",
+     "https://en.wikipedia.org/wiki/Bloom_filter",
+     [
+      "https://en.wikipedia.org/wiki/Bloom_filter"
+     ],
+     null,
+     null
+    ]
+   ]
+  ]
+ },
+ {
+  "name": "the reply shows its research folded, with links",
+  "js": "const el = [...document.querySelectorAll('.msg.assistant')].pop(); const r = el.querySelector('.research'); return [r.open, r.querySelector('summary').textContent, [...r.querySelectorAll('a')].map(a => a.textContent), [...r.querySelectorAll(':scope > ul > li')].map(li => li.firstChild.textContent), el.querySelector('.msg-body > p a').href]",
+  "expect": [
+   false,
+   "Web research · 1 search, 1 page",
+   [
+    "Bloom filter - Wikipedia",
+    "Probabilistic data structures",
+    "Bloom filter - Wikipedia"
+   ],
+   [
+    "Searched “bloom filter false negatives”",
+    "Read "
+   ],
+   "https://en.wikipedia.org/wiki/Bloom_filter"
+  ]
+ },
+ {
+  "name": "what the model was sent: tools, a bigger context, the prompt, focused results",
+  "js": "const c = (await t.chats()).slice(-3); const tool = (r) => r.turn.filter(m => m.role === 'tool'); const found = tool(c[1])[0].content; const wiki = found.split('## [Probabilistic')[0]; return [c.map(r => [r.model, r.tools, r.num_ctx]), c[0].system.includes('Today is ') && c[0].system.includes('call web_search first'), tool(c[1]).map(m => m.tool_name), wiki.startsWith('## [Bloom filter - Wikipedia](https://en.wikipedia.org/wiki/Bloom_filter)\\nBloom filter\\nA Bloom filter is'), wiki.includes('False negatives are impossible'), wiki.includes('gardening'), found.endsWith('[title](address).)'), tool(c[2]).map(m => m.tool_name), c[2].turn.map(m => m.role), (await t.log()).filter(r => r.path.includes('/web_')).map(r => r.query || r.url)]",
+  "expect": [
+   [
+    [
+     "mock-researcher",
+     true,
+     16384
+    ],
+    [
+     "mock-researcher",
+     true,
+     16384
+    ],
+    [
+     "mock-researcher",
+     true,
+     16384
+    ]
+   ],
+   true,
+   [
+    "web_search"
+   ],
+   true,
+   true,
+   false,
+   true,
+   [
+    "web_search",
+    "web_fetch"
+   ],
+   [
+    "assistant",
+    "tool",
+    "assistant",
+    "tool"
+   ],
+   [
+    "bloom filter false negatives",
+    "https://en.wikipedia.org/wiki/Bloom_filter"
+   ]
+  ]
+ },
+ {
+  "name": "notes extracted with the chat's context, so Ollama doesn't reload the model",
+  "js": "await t.until(() => t.$('#extractStatus').textContent === '' && document.querySelectorAll('.node').length > 1, 20000); const x = (await t.log()).filter(r => r.format).pop(); return [x.model, x.num_ctx]",
+  "expect": [
+   "mock-researcher",
+   16384
+  ]
+ },
+ {
+  "shot": "research-1"
+ },
+ {
+  "name": "the hourly limit stops searching, and the model still answers",
+  "js": "const m = await t.ask('limit please'); const c = (await t.chats()).slice(-2); return [m.content, m.research.map(s => [s.input, s.error]), c.map(r => r.tools), c[1].turn.filter(x => x.role === 'tool')[0].content.includes(\"Web search isn't available\")]",
+  "expect": [
+   "Let me check.\n\nI couldn't search the web, so from memory: no false negatives.",
+   [
+    [
+     "limit test",
+     "you have reached your web search hourly request limit, upgrade for higher limits: https://ollama.com/upgrade"
+    ]
+   ],
+   [
+    true,
+    false
+   ],
+   true
+  ]
+ },
+ {
+  "name": "a model that keeps searching has to answer after 4 rounds",
+  "js": "const m = await t.ask('loop forever'); const c = (await t.chats()).slice(-5); return [m.content, m.research.map(s => s.input), c.map(r => r.tools), c[4].turn.filter(x => x.role === 'tool').pop().content.endsWith('That was your last search: answer now, from the results above.')]",
+  "expect": [
+   "Done looping.",
+   [
+    "loop 1",
+    "loop 2",
+    "loop 3",
+    "loop 4"
+   ],
+   [
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   true
+  ]
+ },
+ {
+  "name": "Stop during a search",
+  "js": "t.$('#input').value = 'slow please'; t.$('#composer').requestSubmit(); await t.until(() => document.querySelector('.msg.assistant:last-child .research .cursor'), 10000); const searching = document.querySelector('.msg.assistant:last-child .research summary').textContent; t.$('#stopBtn').click(); await t.until(() => t.$('#stopBtn').hidden, 5000); await t.sleep(600); const s = t.state(); const m = s.chat[s.chat.length - 1]; const el = [...document.querySelectorAll('.msg.assistant')].pop(); return [searching, m.streaming, m.content, m.error ?? null, m.research.map(x => [x.input, x.error, x.pending ?? null]), !!el.querySelector('.cursor')]",
+  "expect": [
+   "Searching the web…",
+   false,
+   "Let me check.",
+   null,
+   [
+    [
+     "slow test",
+     "Stopped.",
+     null
+    ]
+   ],
+   false
+  ]
+ },
+ {
+  "name": "with Web search off: no tools, no prompt, the model's own context",
+  "js": "t.$('#autoNotes').click(); t.$('#webSearch').click(); await t.sleep(300); const m = await t.ask('plain question'); const c = (await t.chats()).pop(); return [t.state().settings.webSearch, c.tools, c.num_ctx ?? null, c.system.includes('Today is'), m.content, m.research ?? null, [...document.querySelectorAll('.msg.assistant')].pop().querySelector('.research')]",
+  "expect": [
+   false,
+   false,
+   null,
+   false,
+   "No tools here.",
+   null,
+   null
+  ]
+ },
+ {
+  "name": "a model without tools: a toast, and no search",
+  "js": "t.$('#webSearch').click(); const s = t.$('#modelSelect'); s.value = 'mock-plain'; s.dispatchEvent(new Event('change')); await t.sleep(300); const m = await t.ask('plain again'); const c = (await t.chats()).pop(); return [t.toast(), c.tools, c.num_ctx, m.content]",
+  "expect": [
+   "mock-plain can't use tools, so it answers without searching the web. Models such as qwen3 can.",
+   false,
+   16384,
+   "No tools here."
+  ]
+ },
+ {
+  "reload": true
+ },
+ {
+  "name": "after a reload the research is still there, folded",
+  "js": "const s = t.state(); const m = s.chat.find(x => x.research && x.research.length === 2); const el = document.querySelector(`.msg[data-id=\"${m.id}\"] .research`); return [el.open, el.querySelector('summary').textContent, s.chat.flatMap(x => x.research || []).some(x => x.pending)]",
+  "expect": [
+   false,
+   "Web research · 1 search, 1 page",
+   false
+  ]
+ },
+ {
+  "name": "cloud models hide the toggle",
+  "js": "t.$('#settingsBtn').click(); const p = t.$('#setProvider'); p.value = 'other'; p.dispatchEvent(new Event('change')); t.$('#setApiBase').value = '127.0.0.1:9/v1'; t.$('#settingsDialog').close(); await t.sleep(300); const hidden = t.$('#webSearchToggle').hidden; t.$('#settingsBtn').click(); p.value = 'ollama'; p.dispatchEvent(new Event('change')); t.$('#settingsDialog').close(); await t.sleep(300); return [hidden, t.$('#webSearchToggle').hidden]",
+  "expect": [
+   true,
+   false
+  ]
+ },
+ {
+  "shot": "research-2"
+ }
+]

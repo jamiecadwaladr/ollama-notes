@@ -10,6 +10,8 @@ steps.json is a list of steps:
     {"reload": true}                                                   reload the page
     {"dialogs": "accept" | "dismiss"}                                  how to answer confirm() from now on
 
+console.info() in a step is printed at the end, e.g. to report what a real model did.
+
 Needs: the server built (cargo build -p ollama-notes-server), Google Chrome, and Python's websockets package.
 Ollama is used as it is: start it first for steps that chat.
 """
@@ -156,7 +158,7 @@ async def run(steps, out):
                     print(f"FAIL {i:2} {label}\n       {e}")
             problems = [e for e in page.events if e[0] in ("exception", "error")]
             for kind, text in page.events:
-                if kind in ("exception", "error", "warning", "dialog"):
+                if kind in ("exception", "error", "warning", "dialog", "info"):
                     print(f"  [{kind}] {text}")
             failures += len(problems)
             reader.cancel()

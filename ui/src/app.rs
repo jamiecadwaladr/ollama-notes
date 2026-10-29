@@ -51,6 +51,8 @@ pub struct App {
     pub extract_label: RefCell<String>,
     pub extract_aborts: RefCell<Vec<Abort>>,
     pub insp_id: RefCell<Option<String>>,
+    /// The last model a toast said can't search the web, so it says so once.
+    pub no_tools_toast: RefCell<String>,
     /// Nothing is saved before the saved state has been read, so it can't be overwritten.
     loaded: Cell<bool>,
     save_timer: dom::Timer,
@@ -83,6 +85,7 @@ impl App {
             extract_label: RefCell::default(),
             extract_aborts: RefCell::default(),
             insp_id: RefCell::default(),
+            no_tools_toast: RefCell::default(),
             loaded: Cell::new(false),
             save_timer: dom::Timer::default(),
             toast_timer: dom::Timer::default(),
@@ -398,6 +401,7 @@ impl App {
     pub fn apply_settings_to_ui(&self) {
         let s = self.st.borrow().settings.clone();
         input("autoNotes").set_checked(s.auto_notes);
+        input("webSearch").set_checked(s.web_search);
         textarea("setSystem").set_value(&s.system);
         input("setTemp").set_value(&num(s.temperature));
         input("setMaxNotes").set_value(&num(s.max_notes));
@@ -445,9 +449,11 @@ impl App {
         self.show_provider_fields();
     }
 
-    /// Points the client at the models chosen in Settings. In browser mode, Ollama is the page's own server.
+    /// Points the client at the models chosen in Settings. In browser mode, Ollama is the page's own server. Web
+    /// search goes through Ollama, so only its models get the toggle.
     fn connect(&self) {
         let s = self.st.borrow().settings.clone();
+        html("webSearchToggle").set_hidden(s.provider != Provider::Ollama);
         match s.provider {
             Provider::OpenAi => self.ollama.set_host(&normalize_api_base(&s.api_base), Some(&s.api_key)),
             Provider::Ollama if self.platform.is_desktop() => {

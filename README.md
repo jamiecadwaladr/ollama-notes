@@ -39,6 +39,21 @@ Ollama.
 Thinking is shown when the service streams it (DeepSeek, OpenRouter, Groq). If a model rejects the temperature or the
 note-extraction JSON schema, the request is retried without it.
 
+### Web search
+
+With **Web search** on (the toggle next to Auto-notes), Ollama models that can call tools research before they
+answer: the model searches the web, reads the pages it needs, and answers with links to its sources. The searches and
+pages behind a reply are listed above it. `ollama show <model>` lists *tools* under Capabilities for models that can
+(qwen3, llama3.1, gpt-oss and others); with other models a toast says so and they answer without searching.
+
+The searches go through Ollama's own web search, which uses the ollama.com account you sign in with (`ollama signin`,
+once), so there's no key to set up here. A free account has an hourly limit on searches; when it runs out, the model
+answers without searching and the reply says why. Search queries, and the addresses of pages the model reads, go to
+ollama.com. Cloud models from **Settings › Models from** don't get web search.
+
+While web search is on, chats ask Ollama for a 16K-token context instead of the default 4K, so the results fit. Note
+extraction with the chat model asks for the same, so Ollama doesn't reload the model between the two.
+
 ### Your data
 
 Everything is saved as you go to `~/Library/Application Support/Ollama Notes/notes.json` (**File › Show Data in
@@ -73,6 +88,8 @@ there, then **File › Import Map…** in the app.
   conversation and to any related existing notes. Turn this off with the **Auto-notes** toggle.
 - Each reply also has manual **Extract notes** and **Save as note** actions.
 - Notes can be **pinned to chat context**: their content is injected into the system prompt.
+- With **Web search** on, the model looks things up and reads pages before answering, and cites them (see
+  [Web search](#web-search)).
 
 **Map (right pane)**
 - Drag to pan, scroll to pan, ⌘/Ctrl + scroll (or pinch) to zoom. Double-click empty space to add a note.
@@ -128,10 +145,11 @@ crates/core/                  logic shared by everything, no I/O: tested with ca
   keywords.rs                   TF-IDF keywords and keyword links
   extract.rs  ollama.rs         note extraction prompts and merging; the Ollama API as data
   openai.rs                     cloud APIs (OpenAI-style chat completions) as data
+  websearch.rs                  web search for the model: its tools, the research prompt, results cut to fit
   text.rs  markdown.rs          sectioning, file names, PDF text; safe Markdown (pulldown-cmark)
 crates/native/                the data file (with its per-session backup) and starting Ollama
 ui/                           the page: index.html, style.css, src/*.rs, vendored pdf.js (+ js/pdf_shim.js)
-  app.rs chat.rs import.rs      state and saving, the conversation, importing documents
+  app.rs chat.rs import.rs      state and saving, the conversation and its research, importing documents
   graph_view.rs inspector.rs    the map on screen, the inspector and popovers
   platform.rs ollama.rs         app vs browser differences; talking to Ollama or a cloud API
 src-tauri/                    the desktop app: window, menu bar, commands for the page, quitting
@@ -139,7 +157,8 @@ server/                       browser mode: serves ui/dist, proxies /api/* to Ol
 tools/make-icon/              draws the app icon (scripts/icons.sh makes src-tauri/icons from it)
 tools/golden/                 regenerates the tests that compare crates/core with the original JS
 tools/e2e/                    drives the page in headless Chrome against the server (tools/e2e/smoke.json;
-                              cloud.json against the stand-in API in mock_openai.py)
+                              cloud.json against the stand-in API in mock_openai.py; research.json against the
+                              stand-in Ollama in mock_ollama.py; research-live.json with a real model and search)
 scripts/check.sh              the quality gate: fmt, clippy (native and wasm32), tests
 ```
 

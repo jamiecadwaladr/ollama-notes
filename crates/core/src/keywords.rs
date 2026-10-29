@@ -82,6 +82,11 @@ fn usable(t: &str) -> bool {
         && !STOP.contains(stem(t).as_str())
 }
 
+/// The stems of a text's meaningful words (no stop words, numbers or very short words), to compare texts by.
+pub fn word_stems(text: &str) -> HashSet<String> {
+    tokenize(text).iter().filter(|t| usable(t)).map(|t| stem(t)).collect()
+}
+
 /// The canonical key of a keyword or phrase, so "Hash Sets" and "hash set" match.
 pub fn key_of(display: &str) -> String {
     tokenize(display).iter().filter(|t| usable(t)).map(|t| stem(t)).collect::<Vec<_>>().join(" ")

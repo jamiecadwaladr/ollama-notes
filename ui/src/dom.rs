@@ -143,6 +143,15 @@ pub fn locale_date(ms: f64) -> String {
     call_string(&js_sys::Date::new(&ms.into()).into(), "toLocaleDateString")
 }
 
+/// Today's date in words, e.g. "Thursday 29 October 2026".
+pub fn long_date() -> String {
+    let opts = js_sys::Object::new();
+    for (k, v) in [("weekday", "long"), ("day", "numeric"), ("month", "long"), ("year", "numeric")] {
+        let _ = js_sys::Reflect::set(&opts, &k.into(), &v.into());
+    }
+    js_sys::Date::new_0().to_locale_date_string("en-GB", &opts).into()
+}
+
 /// `n.toLocaleString()`, e.g. 12,345.
 pub fn locale_number(n: usize) -> String {
     let format = js_sys::Intl::NumberFormat::new(&js_sys::Array::new(), &js_sys::Object::new()).format();

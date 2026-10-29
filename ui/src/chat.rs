@@ -2,12 +2,14 @@
 
 use crate::app::{App, html, plural, textarea};
 use crate::dom::{self, esc};
-use crate::ollama::{Abort, AbortReason, Error};
+use crate::ollama::{Abort, AbortReason, ChatOptions, Error};
 use notes_core::extract::{self, CHAT_EXTRACT_SYSTEM, EXTRACT_TIMEOUT_MS};
-use notes_core::markdown;
-use notes_core::model::{DEFAULT_TITLE, Message, Node, Source};
+use notes_core::keywords::word_stems;
+use notes_core::markdown::{self, is_web_link};
+use notes_core::model::{DEFAULT_TITLE, Message, Node, ResearchStep, Source, WebLink};
 use notes_core::ollama::ChatMessage;
 use notes_core::text::{clean, truncate_chars};
+use notes_core::websearch::{self, Call};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -44,6 +46,9 @@ impl App {
 
     pub fn update_message_el(&self, el: &Element, m: &Message) {
         let mut body = String::new();
+        if let Some(steps) = m.research.as_deref().filter(|r| !r.is_empty()) {
+            body.push_str(&research_html(steps, m.is_streaming()));
+        }
         if let Some(t) = m.thinking.as_deref().filter(|t| !t.is_empty()) {
             body.push_str(&format!(
                 "<details class=\"thinking\"><summary>Thinking</summary><div>{}</div></details>",
@@ -176,22 +181,71 @@ impl App {
         *self.chat_abort.borrow_mut() = Some(abort.clone());
         self.set_busy(true);
 
-        let messages = self.build_messages();
+        let tools = self.offers_web_search(&model).await.then(websearch::tools);
+        let mut messages = self.build_messages();
+        if tools.is_some()
+            && let Some(system) = messages.first_mut()
+        {
+            system.content = format!("{}\n\n{}", system.content, websearch::prompt(&dom::long_date()));
+        }
         let temperature = Some(self.st.borrow().settings.temperature).filter(|t| t.is_finite()).unwrap_or(0.0);
+        let mut opts = ChatOptions { temperature, num_ctx: self.chat_context(), tools: tools.as_ref() };
         // the reply so far, kept here too: a new chat removes the message from the conversation mid-stream
         let reply = RefCell::new(String::new());
-        let result = self
-            .ollama
-            .chat_stream(&model, &messages, temperature, &abort, |s| {
-                reply.replace(s.content.clone());
-                self.with_message(&asst_id, |m| {
-                    m.content = s.content.clone();
-                    m.thinking = Some(s.thinking.clone());
-                });
-                self.schedule_paint(&asst_el, &asst_id);
-            })
-            .await;
+        let (mut thinking, mut focus, mut round) = (String::new(), text.clone(), 0);
+        // Each round streams the model's reply. While it may search, a reply that calls tools gets their results, and
+        // the model goes again; after MAX_ROUNDS of that it has to answer.
+        let result = loop {
+            let earlier = reply.borrow().clone();
+            let streamed = self
+                .ollama
+                .chat_stream(&model, &messages, &opts, &abort, |s| {
+                    let content = websearch::join_rounds(&earlier, &s.content);
+                    reply.replace(content.clone());
+                    self.with_message(&asst_id, |m| {
+                        m.content = content;
+                        m.thinking = Some(websearch::join_rounds(&thinking, &s.thinking));
+                    });
+                    self.schedule_paint(&asst_el, &asst_id);
+                })
+                .await;
+            let s = match streamed {
+                Ok(s) => s,
+                Err(e) => break Err(e),
+            };
+            reply.replace(websearch::join_rounds(&earlier, &s.content));
+            thinking = websearch::join_rounds(&thinking, &s.thinking);
+            if opts.tools.is_none() || s.tool_calls.is_empty() {
+                break Ok(());
+            }
+            messages.push(ChatMessage { tool_calls: s.tool_calls.clone(), ..ChatMessage::new("assistant", s.content) });
+            for (i, raw) in s.tool_calls.iter().enumerate() {
+                let call = Call::parse(raw);
+                let content = if i < websearch::MAX_CALLS {
+                    let (content, search_stopped) = self.run_call(&call, &mut focus, &asst_id, &asst_el, &abort).await;
+                    if search_stopped {
+                        opts.tools = None;
+                    }
+                    content
+                } else {
+                    websearch::skipped()
+                };
+                if abort.is_aborted() {
+                    break;
+                }
+                messages.push(websearch::tool_message(&call, content));
+            }
+            if abort.is_aborted() {
+                break Err(Error::Aborted);
+            }
+            round += 1;
+            if round == websearch::MAX_ROUNDS && opts.tools.is_some() {
+                opts.tools = None;
+                websearch::last_round(&mut messages);
+            }
+        };
         let error = match result {
+            Ok(_) if reply.borrow().trim().is_empty() => Some("The model gave no answer. Try again.".to_string()),
             Ok(_) => None,
             Err(Error::Aborted) => reply.borrow().is_empty().then(|| "Stopped.".to_string()),
             Err(Error::Failed(e)) => Some(e),
@@ -215,6 +269,86 @@ impl App {
         let content = reply.into_inner();
         if !content.is_empty() && self.st.borrow().settings.auto_notes {
             self.spawn_extraction(user.content, asst_id, content);
+        }
+    }
+
+    /// Whether the chat model gets the web search tools: Web search is on, the models are Ollama's, and this one can
+    /// call tools. When it can't, a toast says so, once per model.
+    async fn offers_web_search(&self, model: &str) -> bool {
+        if !self.st.borrow().settings.web_search || self.ollama.is_cloud() {
+            return false;
+        }
+        if self.ollama.capabilities(model).await.iter().any(|c| c == "tools") {
+            return true;
+        }
+        if self.no_tools_toast.replace(model.to_string()) != model {
+            self.toast(
+                &format!("{model} can't use tools, so it answers without searching the web. Models such as qwen3 can."),
+                6000,
+            );
+        }
+        false
+    }
+
+    /// The context for the chat model: room for search results while web search is on.
+    fn chat_context(&self) -> Option<u32> {
+        let on = self.st.borrow().settings.web_search && !self.ollama.is_cloud();
+        on.then_some(websearch::CONTEXT_TOKENS)
+    }
+
+    /// Note extraction options for `model`. The chat model keeps the chat's context, as Ollama reloads a model, which
+    /// takes seconds, whenever its context changes.
+    pub fn extraction_options(&self, model: &str) -> Value {
+        let mut opts = extract::extract_options();
+        if let Some(n) = self.chat_context().filter(|_| model == self.st.borrow().settings.model) {
+            opts["num_ctx"] = n.into();
+        }
+        opts
+    }
+
+    /// Runs one of the model's tool calls, shown in the reply as a research step. Returns what the model reads, and
+    /// whether web search has stopped working for the rest of the reply (e.g. the hourly limit).
+    async fn run_call(
+        &self,
+        call: &Call,
+        focus: &mut String,
+        asst_id: &str,
+        el: &Element,
+        abort: &Abort,
+    ) -> (String, bool) {
+        let index = self.with_message(asst_id, |m| {
+            let steps = m.research.get_or_insert_with(Vec::new);
+            steps.push(call.step());
+            steps.len() - 1
+        });
+        self.schedule_paint(el, asst_id);
+        if let Call::Search(q) = call {
+            focus.push('\n');
+            focus.push_str(q);
+        }
+        let result = match call.request() {
+            Ok((path, body)) => match self.ollama.web(path, &body, abort).await {
+                Ok(reply) => call.found(&reply, &word_stems(focus)),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        let result = if abort.is_aborted() { Err(websearch::Failure::new("Stopped.")) } else { result };
+        if let Some(i) = index {
+            self.with_message(asst_id, |m| {
+                if let Some(step) = m.research.as_mut().and_then(|r| r.get_mut(i)) {
+                    step.pending = None;
+                    match &result {
+                        Ok(found) => step.links = found.links.clone(),
+                        Err(f) => step.error = Some(f.message.clone()),
+                    }
+                }
+            });
+            self.schedule_paint(el, asst_id);
+        }
+        match result {
+            Ok(found) => (found.text, false),
+            Err(f) => (f.for_model(call), f.stops_search),
         }
     }
 
@@ -269,10 +403,8 @@ impl App {
                 ChatMessage::new("system", CHAT_EXTRACT_SYSTEM),
                 ChatMessage::new("user", extract::chat_prompt(hub_title.as_deref(), &existing, user, reply, max)),
             ];
-            let v = self
-                .ollama
-                .chat_json(&model, &messages, &extract::note_schema(), &extract::extract_options(), think, &abort)
-                .await?;
+            let options = self.extraction_options(&model);
+            let v = self.ollama.chat_json(&model, &messages, &extract::note_schema(), &options, think, &abort).await?;
             self.apply_extraction(&v, asst_id);
             Ok::<(), Error>(())
         }
@@ -427,4 +559,60 @@ impl App {
         self.platform.open_url(&href);
         true
     }
+}
+
+/// The searches and page reads behind a reply: open while it streams, then folded into one line.
+fn research_html(steps: &[ResearchStep], streaming: bool) -> String {
+    let link = |l: &WebLink| {
+        if is_web_link(&l.url) {
+            format!(
+                "<a href=\"{}\" target=\"_blank\" rel=\"noopener\" title=\"{}\">{}</a>",
+                esc(&l.url),
+                esc(&l.url),
+                esc(&l.title)
+            )
+        } else {
+            esc(&l.title)
+        }
+    };
+    let items: String = steps
+        .iter()
+        .map(|s| {
+            let what = match s.tool.as_str() {
+                "search" => format!("Searched “{}”", esc(&s.input)),
+                "fetch" => format!("Read {}", s.links.first().map_or_else(|| esc(&s.input), link)),
+                tool => format!("Called {}", esc(tool)),
+            };
+            let detail = if s.is_pending() && streaming {
+                " <span class=\"cursor\"></span>".to_string()
+            } else if let Some(e) = &s.error {
+                format!("<div class=\"research-error\">{}</div>", esc(e))
+            } else if s.tool == "search" && s.links.is_empty() {
+                " · no results".to_string()
+            } else if s.tool == "search" {
+                format!("<ol>{}</ol>", s.links.iter().map(|l| format!("<li>{}</li>", link(l))).collect::<String>())
+            } else {
+                String::new()
+            };
+            format!("<li>{what}{detail}</li>")
+        })
+        .collect();
+    let summary = if streaming && steps.iter().any(ResearchStep::is_pending) {
+        "Searching the web…".to_string()
+    } else {
+        let searches = steps.iter().filter(|s| s.tool == "search").count();
+        let pages = steps.iter().filter(|s| s.is_fetch()).count();
+        let mut parts = Vec::new();
+        if searches > 0 {
+            parts.push(if searches == 1 { "1 search".to_string() } else { format!("{searches} searches") });
+        }
+        if pages > 0 {
+            parts.push(plural(pages, "page"));
+        }
+        format!("Web research · {}", parts.join(", "))
+    };
+    format!(
+        "<details class=\"research\"{}><summary>{summary}</summary><ul>{items}</ul></details>",
+        if streaming { " open" } else { "" }
+    )
 }
