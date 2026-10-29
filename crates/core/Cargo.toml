@@ -1,0 +1,19 @@
+[package]
+name = "notes-core"
+description = "Ollama Notes logic shared by the page (wasm32) and the native crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fastrand.workspace = true
+indexmap.workspace = true
+pulldown-cmark.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,7 +1,8 @@
 # Ollama Notes
 
 A Mac app for chatting with a locally hosted [Ollama](https://ollama.com) model, with a node-based notes map that
-fills itself in as you talk. Native window, menu bar and file panels; no dependencies to install.
+fills itself in as you talk. Native window, menu bar and file panels. Written in Rust: a Tauri desktop shell around a
+page compiled to WebAssembly.
 
 ## Build and run
 
@@ -11,9 +12,15 @@ fills itself in as you talk. Native window, menu bar and file panels; no depende
 ./build.sh --install   # ...and copies it to /Applications
 ```
 
-All it needs is the Xcode Command Line Tools (`xcode-select --install`); the app runs on macOS 14 or later, on Apple
-silicon and Intel. It is signed ad hoc, which is all this Mac needs. If you copy it to another Mac, right-click it and
-choose **Open** the first time.
+Building needs [Rust](https://rustup.rs) plus two targets and two cargo tools (no Node):
+
+```bash
+rustup target add wasm32-unknown-unknown x86_64-apple-darwin
+cargo install --locked trunk tauri-cli
+```
+
+The app runs on macOS 14 or later, on Apple silicon and Intel. It is signed ad hoc, which is all this Mac needs. If you
+copy it to another Mac, right-click it and choose **Open** the first time.
 
 The app talks to Ollama at `http://127.0.0.1:11434`. If Ollama isn't running there when the app starts, it opens
 Ollama.app (or runs `ollama serve`) and connects once it's up. For Ollama on another machine, change
@@ -46,7 +53,8 @@ there, then **File › Import Map…** in the app.
 ## What it does
 
 **Chat (left pane)**
-- Streams replies from the selected model; thinking-model reasoning is shown collapsed.
+- Streams replies from the selected model, rendered as Markdown (including tables); thinking-model reasoning is shown
+  collapsed.
 - After each reply, the model is asked (in a second, structured-JSON call) to extract 1–4 reusable notes:
   concepts, facts, decisions, questions and tasks. They appear in the map linked to a *topic* hub node for the
   conversation and to any related existing notes. Turn this off with the **Auto-notes** toggle.
@@ -72,7 +80,7 @@ there, then **File › Import Map…** in the app.
   keywords in the inspector (a curated list sticks; "auto" goes back to computed ones). Removing a keyword link
   from the inspector keeps that pair unlinked in future runs.
 - **Fit** frames everything and the search box filters notes (keywords included).
-- **Export**/**Import** round-trip the map and chat as JSON.
+- **Export**/**Import** round-trip the map and chat as JSON (the same format as before the Rust rewrite).
 
 **Documents**
 - **＋ File** in the map toolbar (or ⌘O, or drop files onto the map) imports text-like files (.txt, .md, .csv,
@@ -90,43 +98,53 @@ prompt, temperature, max notes per exchange.
 
 ## How it's put together
 
-The UI is the web app in `web/`, shown in a native window by a WKWebView, which loads it from inside the app bundle
-as `app://notes/`. Ollama accepts requests from `app://` pages by default, so the page streams from Ollama directly
-and **Stop** cancels generation on the server. The Swift side adds what a browser tab can't do: the menu bar,
-open/save panels, confirm sheets, the data file, and starting Ollama. Right-click › **Inspect Element** opens the
-Web Inspector. After changing anything in `web/`, run `./build.sh` again: the folder is copied into the app.
+The page in `ui/` is Rust compiled to WebAssembly (built with [Trunk](https://trunkrs.dev)), driving the same HTML
+and CSS as before. The desktop app (`src-tauri/`, [Tauri 2](https://tauri.app)) shows it in a native window as
+`tauri://localhost`. Ollama accepts requests from `tauri://` pages by default, so the page streams from Ollama
+directly and **Stop** cancels generation on the server. The Rust side adds what a browser tab can't do: the menu bar,
+open/save panels, confirm sheets, the data file, and starting Ollama. Right-click › **Inspect Element** opens the Web
+Inspector. Everything that isn't drawing the page (the data model, keywords, the force layout, Markdown, prompts) is in
+`crates/core`, which is tested natively.
 
 ```
-build.sh                        builds build/Ollama Notes.app
-macos/Sources/main.swift        entry point
-macos/Sources/AppDelegate.swift window, menu bar, web view (links, file panels, confirm sheets), quitting
-macos/Sources/Bridge.swift      what the page asks of the app: data file, export, starting Ollama
-macos/Sources/WebAssets.swift   serves web/ to the web view as app://notes
-macos/Info.plist                app bundle metadata
-macos/make-icon.swift           draws the app icon
-web/index.html    layout
-web/style.css     styling (dark theme)
-web/app.js        chat, note extraction, inspector, persistence, menu commands
-web/platform.js   what differs between the app and browser mode (storage, saving files, reaching Ollama)
-web/graph.js      pan/zoom node canvas, linking, placement, force layout
-web/keywords.js   keyword extraction (TF-IDF) and keyword-based auto-linking
-web/documents.js  text/PDF parsing (pdf.js in web/vendor) and sectioning
-web/ollama.js     Ollama API client (streaming chat, JSON-schema chat)
-web/markdown.js   small safe Markdown renderer
-server.py, Ollama Notes.command   browser mode, below
+Cargo.toml                    the workspace
+build.sh                      builds build/Ollama Notes.app (or the browser-mode server)
+crates/core/                  logic shared by everything, no I/O: tested with cargo test
+  model.rs                      the saved state (notes.json, exports), read leniently, unknown fields kept
+  graph.rs  layout.rs  view.rs  the notes map, its force layout, pan/zoom maths
+  keywords.rs                   TF-IDF keywords and keyword links
+  extract.rs  ollama.rs         note extraction prompts and merging; the Ollama API as data
+  text.rs  markdown.rs          sectioning, file names, PDF text; safe Markdown (pulldown-cmark)
+crates/native/                the data file (with its per-session backup) and starting Ollama
+ui/                           the page: index.html, style.css, src/*.rs, vendored pdf.js (+ js/pdf_shim.js)
+  app.rs chat.rs import.rs      state and saving, the conversation, importing documents
+  graph_view.rs inspector.rs    the map on screen, the inspector and popovers
+  platform.rs ollama.rs         app vs browser differences; talking to Ollama
+src-tauri/                    the desktop app: window, menu bar, commands for the page, quitting
+server/                       browser mode: serves ui/dist, proxies /api/* to Ollama
+tools/make-icon/              draws the app icon (scripts/icons.sh makes src-tauri/icons from it)
+tools/golden/                 regenerates the tests that compare crates/core with the original JS
+tools/e2e/                    drives the page in headless Chrome against the server (tools/e2e/smoke.json)
+scripts/check.sh              the quality gate: fmt, clippy (native and wasm32), tests
 ```
+
+For development, `cd ui && trunk serve` serves the page with live reload at http://127.0.0.1:1420 (run
+`target/debug/ollama-notes-server` alongside it, or open it through `cargo tauri dev`, which starts Trunk itself).
 
 ## Browser mode (any OS)
 
-The same UI also runs in a browser tab, with nothing but Python 3: double-click **`Ollama Notes.command`**, or run
+The same UI also runs in a browser tab: double-click **`Ollama Notes.command`** (it builds the server the first time),
+or run
 
 ```bash
-./server.py                # or: python3 server.py
-./server.py --no-browser   # don't open a tab
-./server.py --port 9000    # custom port (default 8765; if busy, the next free port is used)
-./server.py --no-ollama    # don't try to start Ollama
+./build.sh --server                              # once
+target/release/ollama-notes-server               # opens http://localhost:8765
+target/release/ollama-notes-server --no-browser  # don't open a tab
+target/release/ollama-notes-server --port 9000   # custom port (default 8765; if busy, the next free port is used)
+target/release/ollama-notes-server --no-ollama   # don't try to start Ollama
 ```
 
-It starts Ollama if it isn't running, serves `web/` at http://localhost:8765, and proxies `/api/*` to Ollama at
-`http://127.0.0.1:11434` (set `OLLAMA_HOST=http://host:11434` to point somewhere else). In this mode the map is
-saved in the browser's `localStorage` and isn't shared with the app; Export/Import moves it between the two.
+It starts Ollama if it isn't running, serves the page (built into the binary) at http://localhost:8765, and proxies
+`/api/*` to Ollama at `http://127.0.0.1:11434` (set `OLLAMA_HOST=http://host:11434` to point somewhere else). In this
+mode the map is saved in the browser's `localStorage` (the same place as before, so an existing map is still there)
+and isn't shared with the app; Export/Import moves it between the two.

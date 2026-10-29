@@ -1,0 +1,217 @@
+//! Talking to Ollama from the page: same-origin /api in browser mode (the server proxies it), or the Ollama server
+//! itself in the desktop app (Ollama accepts requests from tauri:// pages by default). Aborting a request closes its
+//! connection, so Stop also stops generation on the server.
+
+use crate::dom::{self, js_error, window};
+use notes_core::ollama::{self as api, ChatMessage, ChatStream, ModelInfo};
+use serde_json::Value;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
+use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{AbortController, ReadableStreamDefaultReader, RequestInit, Response};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbortReason {
+    /// The Stop button, or a new chat.
+    Stopped,
+    Timeout,
+    Cancelled,
+}
+
+/// An AbortController that remembers why it was aborted.
+#[derive(Clone)]
+pub struct Abort {
+    ctl: AbortController,
+    reason: Rc<Cell<Option<AbortReason>>>,
+}
+
+impl Abort {
+    pub fn new() -> Abort {
+        Abort { ctl: AbortController::new().expect("AbortController"), reason: Rc::default() }
+    }
+
+    pub fn abort(&self, reason: AbortReason) {
+        if self.reason.get().is_none() {
+            self.reason.set(Some(reason));
+        }
+        self.ctl.abort();
+    }
+
+    pub fn reason(&self) -> Option<AbortReason> {
+        self.reason.get()
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.reason.get().is_some()
+    }
+
+    pub fn same(&self, other: &Abort) -> bool {
+        Rc::ptr_eq(&self.reason, &other.reason)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error {
+    Aborted,
+    Failed(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Aborted => f.write_str("Aborted"),
+            Error::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Ollama {
+    /// Where Ollama is ('' = this page's server).
+    base: RefCell<String>,
+    /// Capabilities per model; they can differ between servers, so changing the host clears it.
+    caps: RefCell<HashMap<String, Vec<String>>>,
+}
+
+async fn text_of(r: &Response) -> String {
+    match r.text() {
+        Ok(p) => JsFuture::from(p).await.ok().and_then(|v| v.as_string()).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+impl Ollama {
+    pub fn host(&self) -> String {
+        self.base.borrow().clone()
+    }
+
+    pub fn set_host(&self, url: &str) {
+        *self.base.borrow_mut() = url.to_string();
+        self.caps.borrow_mut().clear();
+    }
+
+    async fn request(&self, path: &str, body: Option<&Value>, abort: &Abort) -> Result<Response, Error> {
+        let base = self.host();
+        let init = RequestInit::new();
+        init.set_signal(Some(&abort.ctl.signal()));
+        if let Some(b) = body {
+            init.set_method("POST");
+            let headers = web_sys::Headers::new().map_err(|e| Error::Failed(js_error(&e)))?;
+            let _ = headers.set("Content-Type", "application/json");
+            init.set_headers(&headers);
+            init.set_body(&JsValue::from_str(&b.to_string()));
+        }
+        let result = JsFuture::from(window().fetch_with_str_and_init(&format!("{base}{path}"), &init)).await;
+        match result {
+            Ok(r) => Ok(r.unchecked_into()),
+            Err(_) if abort.is_aborted() => Err(Error::Aborted),
+            Err(e) if base.is_empty() => Err(Error::Failed(js_error(&e))),
+            Err(_) => Err(Error::Failed(format!(
+                "Cannot reach Ollama at {base}. Start Ollama.app or run `ollama serve`, or change the server in Settings."
+            ))),
+        }
+    }
+
+    async fn check(r: Response) -> Result<Response, Error> {
+        if r.ok() { Ok(r) } else { Err(Error::Failed(api::error_text(r.status(), &text_of(&r).await))) }
+    }
+
+    /// The pulled models, sorted by name. Gives up after 5 s, so an unroutable host doesn't hang the status.
+    pub async fn tags(&self) -> Result<Vec<ModelInfo>, Error> {
+        let abort = Abort::new();
+        let timer = {
+            let a = abort.clone();
+            dom::set_timeout(5000, move || a.abort(AbortReason::Timeout))
+        };
+        let result = async {
+            let r = Self::check(self.request("/api/tags", None, &abort).await?).await?;
+            api::parse_tags(&text_of(&r).await).map_err(|e| Error::Failed(e.to_string()))
+        }
+        .await;
+        dom::clear_timeout(timer);
+        result.map_err(|e| match e {
+            Error::Aborted => Error::Failed("timed out".into()),
+            e => e,
+        })
+    }
+
+    /// A model's capabilities (e.g. completion, thinking, tools), cached per model name.
+    pub async fn capabilities(&self, model: &str) -> Vec<String> {
+        if let Some(c) = self.caps.borrow().get(model) {
+            return c.clone();
+        }
+        let body = serde_json::json!({ "model": model });
+        let caps = match self.request("/api/show", Some(&body), &Abort::new()).await {
+            Ok(r) if r.ok() => api::parse_capabilities(&text_of(&r).await),
+            _ => Vec::new(),
+        };
+        self.caps.borrow_mut().insert(model.to_string(), caps.clone());
+        caps
+    }
+
+    /// Streams /api/chat. `on_chunk` sees the reply so far each time a line arrives.
+    pub async fn chat_stream(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        temperature: f64,
+        abort: &Abort,
+        mut on_chunk: impl FnMut(&ChatStream),
+    ) -> Result<ChatStream, Error> {
+        let body = api::chat_stream_body(model, messages, temperature);
+        let r = Self::check(self.request("/api/chat", Some(&body), abort).await?).await?;
+        let mut stream = ChatStream::default();
+        let Some(body) = r.body() else { return Ok(stream) };
+        let reader: ReadableStreamDefaultReader = body.get_reader().unchecked_into();
+        let failed = |e: JsValue| if abort.is_aborted() { Error::Aborted } else { Error::Failed(js_error(&e)) };
+        loop {
+            let chunk = JsFuture::from(reader.read()).await.map_err(failed)?;
+            if js_sys::Reflect::get(&chunk, &"done".into()).ok().and_then(|d| d.as_bool()) == Some(true) {
+                break;
+            }
+            let value = js_sys::Reflect::get(&chunk, &"value".into()).unwrap_or(JsValue::UNDEFINED);
+            let bytes = js_sys::Uint8Array::new(&value).to_vec();
+            if stream.push(&bytes).map_err(|e| Error::Failed(e.to_string()))? {
+                on_chunk(&stream);
+            }
+            if stream.is_done() {
+                let _ = reader.cancel();
+                break;
+            }
+        }
+        Ok(stream)
+    }
+
+    /// A non-streamed call that asks for JSON, constrained by `schema`, with the fallbacks of
+    /// `notes_core::ollama::json_fallback` when the server rejects the request.
+    pub async fn chat_json(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        schema: &Value,
+        options: &Value,
+        think: Option<bool>,
+        abort: &Abort,
+    ) -> Result<Value, Error> {
+        let mut body = api::chat_json_body(model, messages, Some(schema), options, think);
+        let mut r = self.request("/api/chat", Some(&body), abort).await?;
+        while !r.ok() {
+            let Some(next) = api::json_fallback(&body) else { break };
+            body = next;
+            r = self.request("/api/chat", Some(&body), abort).await?;
+        }
+        let text = text_of(&Self::check(r).await?).await;
+        if abort.is_aborted() {
+            return Err(Error::Aborted);
+        }
+        let j: Value = serde_json::from_str(&text).map_err(|e| Error::Failed(e.to_string()))?;
+        if let Some(e) = j.get("error").filter(|e| !e.is_null()) {
+            return Err(Error::Failed(e.as_str().map_or_else(|| e.to_string(), str::to_string)));
+        }
+        let content = j.pointer("/message/content").and_then(Value::as_str).unwrap_or("");
+        api::parse_loose_json(content).map_err(|e| Error::Failed(e.to_string()))
+    }
+}

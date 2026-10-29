@@ -1,8 +1,40 @@
 # Ollama Notes → Rust: rewrite plan
 
-Status: **plan only, nothing implemented.** Written 2026-10-29 against the tree in `/Users/jamie/helper`. That tree
-has no git history yet (see M0). Section references like "L02" point to
-`.claude/lessons/2026-10-26-macos-desktop-rebuild.md`.
+Status: **implemented on the `rust` branch** (2026-10-29). The plan below is kept as written; this section records
+where the implementation departed from it and what has been verified.
+
+### Implementation notes
+
+- **The page is plain `web-sys`, not Leptos.** `app.js` and `graph.js` were imperative DOM code, so they were ported
+  1:1 to Rust over `web-sys` (`ui/src/*.rs`), keeping `index.html` and `style.css` unchanged apart from Trunk's tags
+  and table styles. This gives the same DOM, a straight module-for-module port, fewer dependencies and a smaller wasm.
+- **The browser-mode server was written straight against the new page**, and the interim step of hosting the old JS
+  UI in Tauri (M1) was skipped: the whole rewrite landed at once, and the old code stays on `master`.
+- `Node.kind` is a string, not an enum. Unknown values round-trip either way, and a string is simpler.
+- Card heights are read from the DOM each frame, as the JS did, instead of being cached. That has been fine so far.
+- The force layout matches the JS operation for operation: the golden tests compare positions after every tick for
+  200 ticks (within 1e-6), and Tidy's settled positions exactly.
+- The CSP is off (`csp: null`), as in the Swift app; the plan's CSP is still worth adding later.
+- The menu bar has no "Paste and Match Style" and no Edit › Delete, because Tauri's menu API has no arbitrary
+  selectors. Nothing auto-reloads the page if WebKit's content process crashes. Both are listed in §11.
+
+### Verified
+
+- `scripts/check.sh` passes: `cargo fmt --check`, clippy `-D warnings` natively and for wasm32, and 59 tests. Those
+  are the unit tests, 8 golden tests against fixtures generated from the master branch's JS with `jsc`, the store and
+  launcher tests, and the server and app tests.
+- Spike S2 (CORS): Ollama 0.34.1 answers a preflight from `Origin: tauri://localhost` with 204 and
+  `Access-Control-Allow-Origin: tauri://localhost`.
+- Browser mode, end to end in headless Chrome (`tools/e2e/drive.py tools/e2e/smoke.json`, 31 steps, all passing):
+  - notes, keywords and saving, including a reload
+  - a streamed chat with automatic note extraction
+  - Stop, which also stops generation on the server (Ollama's log shows the request ending ~2.6 s in)
+  - documents: a text file, and a dropped PDF parsed by pdf.js with notes extracted
+  - keyword links, the filter, Tidy with no overlapping cards, pinning
+  - importing an export, Clear map, New chat, Settings
+- The server: MIME types (including `.mjs` and `.wasm`), `no-store`, 404/405, streaming `/api/chat`, and detecting
+  an already-running copy.
+- The icon drawn by `tools/make-icon` matches the Swift-drawn one.
 
 ## 1. Summary
 

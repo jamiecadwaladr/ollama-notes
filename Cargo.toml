@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/native", "ui", "src-tauri", "server", "tools/make-icon"]
+# The page (ui) only runs as wasm32, and the app (src-tauri) embeds ui/dist at compile time; scripts/check.sh
+# builds and lints both explicitly.
+default-members = ["crates/core", "crates/native", "server", "tools/make-icon"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[workspace.dependencies]
+notes-core = { path = "crates/core" }
+notes-native = { path = "crates/native" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+fastrand = "2"
+tempfile = "3"
+dirs = "6"
+proptest = "1"
+
+# server
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+futures-util = "0.3"
+rust-embed = "8"
+mime_guess = "2"
+clap = { version = "4", features = ["derive", "env"] }
+open = "5"
+
+# desktop app
+tauri = "2.12"
+tauri-build = "2.7"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2.7"
+tauri-plugin-single-instance = "2.5"
+tauri-plugin-window-state = "2.5"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+
+# page
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+
+# icon
+tiny-skia = "0.12"
+
+# Debug info is most of a debug build's size: keep line tables for this workspace's crates, none for dependencies.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.release.package.notes-ui]
+opt-level = "z"

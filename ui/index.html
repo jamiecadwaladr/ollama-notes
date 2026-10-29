@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ollama Notes</title>
+<link data-trunk rel="css" href="style.css">
+<link data-trunk rel="copy-dir" href="vendor">
+<link data-trunk rel="rust" data-wasm-opt="z" data-bin="notes-ui">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="logo">◎</span> Ollama Notes</div>
+  <div class="topbar-center">
+    <label class="field"><span>Model</span>
+      <select id="modelSelect"><option value="">loading…</option></select>
+    </label>
+    <label class="toggle" title="After each reply, ask the model to extract notes into the map">
+      <input type="checkbox" id="autoNotes" checked><span>Auto-notes</span>
+    </label>
+  </div>
+  <div class="topbar-right">
+    <div id="status" class="status"><span class="dot"></span><span class="status-text">connecting…</span></div>
+    <button id="settingsBtn" class="icon-btn" title="Settings">⚙</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="chat" id="chatPane">
+    <div class="chat-head">
+      <span class="chat-title" id="chatTitle">New conversation</span>
+      <button id="newChatBtn" class="btn small">New chat</button>
+    </div>
+    <div class="context-bar" id="contextBar" hidden></div>
+    <div class="messages" id="messages"></div>
+    <form class="composer" id="composer">
+      <textarea id="input" rows="2" placeholder="Ask the model…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <div class="composer-row">
+        <span class="hint" id="extractStatus"></span>
+        <button type="button" id="stopBtn" class="btn small danger" hidden>Stop</button>
+        <button type="submit" id="sendBtn" class="btn primary">Send</button>
+      </div>
+    </form>
+  </section>
+
+  <div class="splitter" id="splitter" title="Drag to resize"></div>
+
+  <section class="map" id="mapPane">
+    <div class="map-toolbar">
+      <button id="addNodeBtn" class="btn small" title="Or double-click the canvas">+ Note</button>
+      <button id="fitBtn" class="btn small" title="Fit all notes in view">Fit</button>
+      <button id="tidyBtn" class="btn small" title="Re-run the layout from scratch">Tidy</button>
+      <label class="toggle small" title="Live layout: notes repel each other, links pull, gravity centres the map"><input type="checkbox" id="physicsToggle" checked><span>Physics</span></label>
+      <div class="popover-wrap">
+        <button id="physicsBtn" class="btn small" title="Tune the layout forces">Forces ▾</button>
+        <div class="popover" id="physicsPop" hidden>
+          <label>Tension <input type="range" id="phTension" min="0.2" max="3" step="0.1"><span class="val"></span></label>
+          <label>Gravity <input type="range" id="phGravity" min="0" max="3" step="0.1"><span class="val"></span></label>
+          <label>Spacing <input type="range" id="phRepulsion" min="0.2" max="3" step="0.1"><span class="val"></span></label>
+          <p class="muted">Forces scale with a note's number of links: well-connected notes pull harder, take more room and settle nearer the centre. Drag a note to nudge the layout; lock it from the inspector to hold it in place.</p>
+          <button id="phReset" class="btn small">Reset to defaults</button>
+        </div>
+      </div>
+      <div class="popover-wrap">
+        <button id="kwBtn" class="btn small" title="Link notes that share important keywords">Keywords ▾</button>
+        <div class="popover" id="kwPop" hidden>
+          <label class="toggle"><input type="checkbox" id="kwEnabled"><span>Auto-link notes that share keywords</span></label>
+          <label>Strictness <input type="range" id="kwThreshold" min="0.5" max="3" step="0.1"><span class="val"></span></label>
+          <p class="muted">Each note gets a few important keywords: from the model when it is extracted from a chat, otherwise from its own text (words common to the whole map don't count). Notes sharing rare keywords get a dashed link labelled with them. Edit a note's keywords in the inspector; remove a keyword link there and it stays removed.</p>
+          <div class="row"><button id="kwRun" class="btn small">Link now</button><button id="kwClear" class="btn small danger">Remove keyword links</button></div>
+        </div>
+      </div>
+      <div class="zoom-group">
+        <button id="zoomOutBtn" class="btn small" title="Zoom out (⌘ + scroll)">−</button>
+        <button id="zoomInBtn" class="btn small" title="Zoom in (⌘ + scroll)">+</button>
+      </div>
+      <input id="search" type="search" placeholder="Filter notes…">
+      <span class="spacer"></span>
+      <span class="map-count" id="mapCount"></span>
+      <button id="importDocBtn" class="btn small" title="Import text files or PDFs: their content becomes notes in the map (you can also drop files onto the map)">＋ File</button>
+      <input type="file" id="docFile" multiple hidden>
+      <button id="exportBtn" class="btn small" title="Download map + chat as JSON">Export map</button>
+      <button id="importBtn" class="btn small" title="Load a previously exported JSON file">Import map</button>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+      <button id="clearMapBtn" class="btn small danger">Clear map</button>
+    </div>
+
+    <div class="canvas" id="canvas">
+      <div class="world" id="world">
+        <svg class="edges" id="edges"></svg>
+        <div class="nodes" id="nodes"></div>
+      </div>
+      <div class="canvas-empty" id="canvasEmpty">
+        <p><strong>Your map is empty.</strong></p>
+        <p>Chat with the model and notes will appear here automatically,<br>or double-click anywhere to add one by hand.</p>
+        <p class="muted">Drag to pan · scroll to pan · ⌘/Ctrl + scroll to zoom · drag a note's handle onto another to link · notes arrange themselves</p>
+        <p class="muted">Drop text files or PDFs here to turn them into notes.</p>
+      </div>
+    </div>
+
+    <aside class="inspector" id="inspector" hidden>
+      <div class="insp-head">
+        <span id="inspKindBadge" class="badge"></span>
+        <button id="inspClose" class="icon-btn" title="Close">×</button>
+      </div>
+      <input id="inspTitle" class="insp-title" placeholder="Title" autocomplete="off">
+      <select id="inspKind">
+        <option value="topic">Topic</option>
+        <option value="source">Document</option>
+        <option value="concept">Concept</option>
+        <option value="fact">Fact</option>
+        <option value="decision">Decision</option>
+        <option value="question">Question</option>
+        <option value="task">Task</option>
+        <option value="note">Note</option>
+      </select>
+      <textarea id="inspBody" placeholder="Write anything…"></textarea>
+      <div class="insp-section">
+        <div class="label">Keywords <button class="link-btn" id="inspKwAuto" title="Recompute from the note's text">auto</button></div>
+        <input id="inspKeywords" placeholder="comma, separated, keywords" autocomplete="off">
+      </div>
+      <div class="insp-section">
+        <div class="label">Linked notes</div>
+        <div id="inspLinks" class="chips"></div>
+      </div>
+      <div class="insp-actions">
+        <button id="inspPin" class="btn small">Pin to chat context</button>
+        <button id="inspAsk" class="btn small">Ask about this</button>
+        <button id="inspSource" class="btn small">Show source</button>
+        <button id="inspLock" class="btn small" title="Keep this note where it is; the layout moves everything else around it">Lock position</button>
+        <button id="inspDelete" class="btn small danger">Delete</button>
+      </div>
+      <div class="insp-meta muted" id="inspMeta"></div>
+    </aside>
+  </section>
+</main>
+
+<dialog id="settingsDialog">
+  <form method="dialog" id="settingsForm">
+    <h2>Settings</h2>
+    <label id="setHostRow" hidden>Ollama server
+      <input type="text" id="setHost" placeholder="http://127.0.0.1:11434" spellcheck="false" autocomplete="off">
+      <span class="muted">Leave as is for Ollama on this Mac (it's started for you if it isn't running), or enter another machine's address.</span>
+    </label>
+    <label>Chat model
+      <select id="setModel"></select>
+    </label>
+    <label>Notes extraction model
+      <select id="setExtractModel"><option value="">Same as chat model</option></select>
+      <span class="muted">A small, fast model works well here (e.g. a 3B–8B instruct model).</span>
+    </label>
+    <label>System prompt
+      <textarea id="setSystem" rows="4"></textarea>
+    </label>
+    <div class="two-col">
+      <label>Temperature
+        <input type="number" id="setTemp" min="0" max="2" step="0.1">
+      </label>
+      <label>Max notes per exchange
+        <input type="number" id="setMaxNotes" min="1" max="8" step="1">
+      </label>
+    </div>
+    <label class="toggle"><input type="checkbox" id="setAutoFit"><span>Fit the map into view after new notes are added</span></label>
+    <p class="muted" id="setProxyNote">Requests go through <code>server.py</code>, which proxies to Ollama. Set the <code>OLLAMA_HOST</code> environment variable before starting the server to point somewhere else.</p>
+    <div class="dialog-row">
+      <button class="btn primary" value="ok">Done</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="docDialog">
+  <form method="dialog" id="docForm">
+    <h2 id="docTitle">Import documents</h2>
+    <ul id="docList" class="doc-list"></ul>
+    <label class="toggle"><input type="checkbox" id="docExtract" checked><span>Extract notes with the model, section by section</span></label>
+    <div class="two-col">
+      <label>Max sections per document
+        <input type="number" id="docMaxSections" min="1" max="200" step="1" value="20">
+      </label>
+      <label>Section size (characters)
+        <input type="number" id="docChunkSize" min="800" max="8000" step="100" value="2400">
+      </label>
+    </div>
+    <label class="toggle"><input type="checkbox" id="docKeepText" checked><span>Keep the full text in the document note (pin it to give the model the document as context)</span></label>
+    <p class="muted" id="docHint"></p>
+    <div class="dialog-row">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="ok" id="docOk">Import</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+
+</body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The page listens for menu commands and the flush before quitting.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,0 +1,71 @@
+[package]
+name = "notes-ui"
+description = "The Ollama Notes page: chat, notes map and inspector (wasm32, built with Trunk)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fastrand.workspace = true
+js-sys.workspace = true
+notes-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+
+[dependencies.web-sys]
+workspace = true
+features = [
+    "AbortController",
+    "AbortSignal",
+    "AddEventListenerOptions",
+    "Blob",
+    "BlobPropertyBag",
+    "CssStyleDeclaration",
+    "DataTransfer",
+    "Document",
+    "DomParser",
+    "DomRect",
+    "DomStringMap",
+    "DomTokenList",
+    "DragEvent",
+    "Element",
+    "Event",
+    "EventTarget",
+    "File",
+    "FileList",
+    "Headers",
+    "HtmlAnchorElement",
+    "HtmlButtonElement",
+    "HtmlDialogElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlSelectElement",
+    "HtmlTextAreaElement",
+    "KeyboardEvent",
+    "Location",
+    "MouseEvent",
+    "Node",
+    "NodeList",
+    "Performance",
+    "PointerEvent",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "RequestInit",
+    "ResizeObserver",
+    "ResizeObserverEntry",
+    "Response",
+    "ScrollBehavior",
+    "ScrollIntoViewOptions",
+    "ScrollLogicalPosition",
+    "Storage",
+    "SupportedType",
+    "SvgTextContentElement",
+    "Url",
+    "WheelEvent",
+    "Window",
+    "console",
+]

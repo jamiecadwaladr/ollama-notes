@@ -1,0 +1,20 @@
+[package]
+name = "notes-native"
+description = "Ollama Notes on the machine itself: the data file and starting Ollama"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+dirs.workspace = true
+notes-core.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSUserDefaults"] }
+
+[dev-dependencies]
+tempfile.workspace = true

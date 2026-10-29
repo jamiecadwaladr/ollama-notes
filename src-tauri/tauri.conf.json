@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ollama Notes",
+  "mainBinaryName": "Ollama Notes",
+  "version": "1.0.0",
+  "identifier": "local.ollama-notes",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": { "script": "trunk serve", "cwd": "../ui", "wait": false }
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "category": "Productivity",
+    "copyright": "Chat with local Ollama models; notes map themselves as you talk.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.png"],
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-"
+    }
+  }
+}
