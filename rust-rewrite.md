@@ -35,6 +35,29 @@ where the implementation departed from it and what has been verified.
 - The server: MIME types (including `.mjs` and `.wasm`), `no-store`, 404/405, streaming `/api/chat`, and detecting
   an already-running copy.
 - The icon drawn by `tools/make-icon` matches the Swift-drawn one.
+- The desktop app (`./build.sh`): a 14 MB universal, ad-hoc-signed bundle with the same bundle id, and the ATS and
+  local-network keys merged into Info.plist. `tools/e2e/app-check.sh` launches it on a temporary data folder and
+  checks four things:
+  - the wasm page runs in the app's WKWebView from `tauri://localhost`, and loads and saves through the Rust commands,
+    which also writes the session backup
+  - the `-DataDirectory` launch argument is honoured
+  - a seeded map round-trips with unknown fields kept
+  - a normal quit (`osascript … quit`) goes through the page's last save in 0.28 s; spike S4 for the AppleEvent path
+  Ollama's log shows the app's `GET /api/tags` from its `tauri://` page succeeding.
+
+### Not yet checked by hand in the app
+
+These need someone at the keyboard (Tauri's WebDriver doesn't support macOS):
+- the menu bar and its shortcuts
+- the confirm, open and save sheets (spike S3)
+- dropping files onto the map in the app window
+- trackpad pinch
+- ⌘Q, the close button and Dock › Quit (spike S4)
+- single instance, and the remembered window position
+- opening reply links in the browser
+- starting Ollama when it isn't running
+
+A short manual pass through §10's "Shell" list covers them.
 
 ## 1. Summary
 
