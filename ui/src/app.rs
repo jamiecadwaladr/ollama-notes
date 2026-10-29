@@ -7,10 +7,11 @@ use crate::graph_view::{Els, GraphEvent, GraphView};
 use crate::ollama::{Abort, AbortReason, Ollama};
 use crate::platform::Platform;
 use notes_core::graph::new_id;
-use notes_core::host::{DEFAULT_OLLAMA_HOST, normalize_host};
+use notes_core::host::{DEFAULT_OLLAMA_HOST, normalize_api_base, normalize_host};
 use notes_core::keywords::LinkChanges;
-use notes_core::model::{AppState, Message};
+use notes_core::model::{AppState, Message, Provider};
 use notes_core::ollama::ModelInfo;
+use notes_core::openai;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use wasm_bindgen::JsCast;
@@ -50,14 +51,17 @@ pub struct App {
     pub extract_label: RefCell<String>,
     pub extract_aborts: RefCell<Vec<Abort>>,
     pub insp_id: RefCell<Option<String>>,
+    /// The last model a toast said can't search the web, so it says so once.
+    pub no_tools_toast: RefCell<String>,
     /// Nothing is saved before the saved state has been read, so it can't be overwritten.
     loaded: Cell<bool>,
     save_timer: dom::Timer,
     toast_timer: dom::Timer,
     models_timer: dom::Timer,
     pub kw_timer: dom::Timer,
-    /// The app starts a local Ollama once: at launch, or when the server changes in Settings.
-    may_start_ollama: Cell<bool>,
+    /// Set at launch and when the connection changes in Settings: if the models can't be listed, the app then starts
+    /// a local Ollama, or shows the cloud API's error.
+    reconnected: Cell<bool>,
     started_ollama_at: Cell<f64>,
     rng: RefCell<fastrand::Rng>,
     pub paint_frame: Cell<Option<i32>>,
@@ -81,12 +85,13 @@ impl App {
             extract_label: RefCell::default(),
             extract_aborts: RefCell::default(),
             insp_id: RefCell::default(),
+            no_tools_toast: RefCell::default(),
             loaded: Cell::new(false),
             save_timer: dom::Timer::default(),
             toast_timer: dom::Timer::default(),
             models_timer: dom::Timer::default(),
             kw_timer: dom::Timer::default(),
-            may_start_ollama: Cell::new(platform.is_desktop()),
+            reconnected: Cell::new(true),
             started_ollama_at: Cell::new(0.0),
             rng: RefCell::new(fastrand::Rng::with_seed(seed)),
             paint_frame: Cell::new(None),
@@ -216,7 +221,9 @@ impl App {
             t.set_text_content(Some(text));
         }
         let host = self.ollama.host();
-        s.set_title(&if ok {
+        s.set_title(&if ok && self.ollama.is_cloud() {
+            format!("Connected to {host}")
+        } else if ok {
             format!("Connected to Ollama{}", if host.is_empty() { String::new() } else { format!(" at {host}") })
         } else {
             "Start Ollama.app (or run `ollama serve`); Ollama Notes reconnects automatically.".to_string()
@@ -275,25 +282,37 @@ impl App {
     }
 
     async fn refresh_models_now(&self) {
+        let cloud = self.ollama.is_cloud();
         match self.ollama.tags().await {
             Ok(models) => {
                 let n = models.len();
                 *self.models.borrow_mut() = models;
+                let source = if cloud { openai::service_name(&self.ollama.host()) } else { "Ollama".into() };
                 self.set_status(
                     true,
-                    &if n > 0 {
-                        format!("Ollama · {}", plural(n, "model"))
-                    } else {
-                        "Ollama · no models pulled".into()
+                    &match (n, cloud) {
+                        (0, false) => "Ollama · no models pulled".into(),
+                        (0, true) => format!("{source} · no models"),
+                        _ => format!("{source} · {}", plural(n, "model")),
                     },
                 );
-                if n == 0 {
+                if n == 0 && cloud {
+                    self.toast(&format!("{source} lists no chat models."), 6000);
+                } else if n == 0 {
                     self.toast("No models found. Pull one first, e.g.  ollama pull llama3.2", 6000);
+                }
+            }
+            Err(e) if cloud => {
+                self.models.borrow_mut().clear();
+                self.set_status(false, "Not connected");
+                html("status").set_title(&e.to_string());
+                if self.reconnected.get() {
+                    self.toast(&e.to_string(), 8000);
                 }
             }
             Err(_) => {
                 self.models.borrow_mut().clear();
-                if self.may_start_ollama.get() && self.platform.start_ollama(&self.ollama.host()).await.is_some() {
+                if self.reconnected.get() && self.platform.start_ollama(&self.ollama.host()).await.is_some() {
                     self.started_ollama_at.set(dom::now());
                 }
                 self.set_status(
@@ -302,21 +321,34 @@ impl App {
                 );
             }
         }
-        self.may_start_ollama.set(false);
+        self.reconnected.set(false);
         let names: Vec<String> = self.models.borrow().iter().map(|m| m.name.clone()).collect();
-        let current = self.st.borrow().settings.model.clone();
-        if !names.is_empty() && !names.contains(&current) {
-            let pick = names.iter().find(|n| !n.to_lowercase().contains("embed")).unwrap_or(&names[0]).clone();
-            self.st.borrow_mut().settings.model = pick;
-            self.save();
+        if !names.is_empty() {
+            let changed = {
+                let s = &mut self.st.borrow_mut().settings;
+                let model_gone = !names.contains(&s.model);
+                if model_gone {
+                    s.model = names.iter().find(|n| !n.to_lowercase().contains("embed")).unwrap_or(&names[0]).clone();
+                }
+                // e.g. a model of the previous provider: extract with the chat model instead
+                let extract_gone = !s.extract_model.is_empty() && !names.contains(&s.extract_model);
+                if extract_gone {
+                    s.extract_model.clear();
+                }
+                model_gone || extract_gone
+            };
+            if changed {
+                self.save();
+            }
         }
         self.fill_model_selects();
-        let delay = if !names.is_empty() {
-            30_000
-        } else if self.starting_ollama() {
-            1000
-        } else {
-            4000
+        // a cloud API's list rarely changes, and a bad key won't fix itself
+        let delay = match (names.is_empty(), cloud) {
+            (false, false) => 30_000,
+            (false, true) => 300_000,
+            (true, true) => 60_000,
+            (true, false) if self.starting_ollama() => 1000,
+            (true, false) => 4000,
         };
         let me = self.weak();
         self.models_timer.start(delay, move || {
@@ -369,17 +401,75 @@ impl App {
     pub fn apply_settings_to_ui(&self) {
         let s = self.st.borrow().settings.clone();
         input("autoNotes").set_checked(s.auto_notes);
+        input("webSearch").set_checked(s.web_search);
         textarea("setSystem").set_value(&s.system);
         input("setTemp").set_value(&num(s.temperature));
         input("setMaxNotes").set_value(&num(s.max_notes));
         input("setAutoFit").set_checked(s.auto_fit);
         input("setHost").set_value(if s.ollama_host.is_empty() { DEFAULT_OLLAMA_HOST } else { &s.ollama_host });
+        let api_base = normalize_api_base(&s.api_base);
+        input("setApiBase").set_value(&api_base);
+        input("setApiKey").set_value(&s.api_key);
+        let choice = match s.provider {
+            Provider::Ollama => "ollama",
+            Provider::OpenAi if openai::SERVICES.iter().any(|(_, url)| *url == api_base) => &api_base,
+            Provider::OpenAi => "other",
+        };
+        select_el("setProvider").set_value(choice);
+        self.show_provider_fields();
         Self::set_chat_width(s.chat_width);
+    }
+
+    /// The "Models from" choices: Ollama, the cloud services by their API address, and any other address.
+    fn fill_provider_select(&self) {
+        let services: String = openai::SERVICES
+            .iter()
+            .map(|(name, url)| format!("<option value=\"{}\">{}</option>", esc(url), esc(name)))
+            .collect();
+        select_el("setProvider").set_inner_html(&format!(
+            "<option value=\"ollama\">Ollama</option>{services}<option value=\"other\">Another OpenAI-compatible API</option>"
+        ));
+    }
+
+    /// Shows the Settings fields for the chosen provider.
+    fn show_provider_fields(&self) {
+        let ollama = select_el("setProvider").value() == "ollama";
+        html("setHostRow").set_hidden(!ollama || !self.platform.is_desktop());
+        html("setProxyNote").set_hidden(!ollama || self.platform.is_desktop());
+        html("setApiBaseRow").set_hidden(ollama);
+        html("setApiKeyRow").set_hidden(ollama);
+    }
+
+    /// A choice in "Models from": a cloud service fills in its API address.
+    pub fn provider_chosen(&self) {
+        let choice = select_el("setProvider").value();
+        if openai::SERVICES.iter().any(|(_, url)| *url == choice) {
+            input("setApiBase").set_value(&choice);
+        }
+        self.show_provider_fields();
+    }
+
+    /// Points the client at the models chosen in Settings. In browser mode, Ollama is the page's own server. Web
+    /// search goes through Ollama, so only its models get the toggle.
+    fn connect(&self) {
+        let s = self.st.borrow().settings.clone();
+        html("webSearchToggle").set_hidden(s.provider != Provider::Ollama);
+        match s.provider {
+            Provider::OpenAi => self.ollama.set_host(&normalize_api_base(&s.api_base), Some(&s.api_key)),
+            Provider::Ollama if self.platform.is_desktop() => {
+                self.ollama.set_host(&normalize_host(&s.ollama_host), None)
+            }
+            Provider::Ollama => self.ollama.set_host("", None),
+        }
     }
 
     pub fn read_settings_from_dialog(&self) {
         let host = normalize_host(&input("setHost").value());
-        let host_changed = {
+        let provider = if select_el("setProvider").value() == "ollama" { Provider::Ollama } else { Provider::OpenAi };
+        let api_base = normalize_api_base(&input("setApiBase").value());
+        let api_key = input("setApiKey").value().trim().to_string();
+        let before = self.connection();
+        {
             let mut st = self.st.borrow_mut();
             let s = &mut st.settings;
             let model = select_el("setModel").value();
@@ -391,20 +481,31 @@ impl App {
             s.temperature = num_or(&input("setTemp").value(), 0.0).clamp(0.0, 2.0);
             s.max_notes = num_or(&input("setMaxNotes").value(), 4.0).clamp(1.0, 8.0);
             s.auto_fit = input("setAutoFit").checked();
-            let changed = self.platform.is_desktop() && host != s.ollama_host;
-            if changed {
-                s.ollama_host = host.clone();
+            if self.platform.is_desktop() {
+                s.ollama_host = host;
             }
-            changed
-        };
-        if host_changed {
-            self.ollama.set_host(&host);
-            self.may_start_ollama.set(true);
-            self.set_status(false, "connecting…");
-            self.refresh_models();
+            s.provider = provider;
+            s.api_base = api_base;
+            s.api_key = api_key;
+        }
+        if self.connection() != before {
+            self.reconnect();
         }
         self.fill_model_selects();
         self.save();
+    }
+
+    /// The settings `connect` uses, to tell when they change.
+    fn connection(&self) -> (Provider, String, String, String) {
+        let s = &self.st.borrow().settings;
+        (s.provider, s.ollama_host.clone(), s.api_base.clone(), s.api_key.clone())
+    }
+
+    fn reconnect(&self) {
+        self.connect();
+        self.reconnected.set(true);
+        self.set_status(false, "connecting…");
+        self.refresh_models();
     }
 
     // ---------- export / import
@@ -436,7 +537,11 @@ impl App {
             return;
         }
         let graph = state.graph.take().unwrap_or_default();
+        let before = self.connection();
         *self.st.borrow_mut() = state;
+        if self.connection() != before {
+            self.reconnect();
+        }
         self.graph.load(graph);
         self.apply_settings_to_ui();
         self.fill_model_selects();
@@ -478,12 +583,8 @@ impl App {
 
     pub async fn start(&self) {
         self.load().await;
-        if self.platform.is_desktop() {
-            let host = normalize_host(&self.st.borrow().settings.ollama_host);
-            self.ollama.set_host(&host);
-        }
-        html("setHostRow").set_hidden(!self.platform.is_desktop());
-        html("setProxyNote").set_hidden(self.platform.is_desktop());
+        self.connect();
+        self.fill_provider_select();
         self.apply_settings_to_ui();
         self.render_chat();
         self.render_context_bar();

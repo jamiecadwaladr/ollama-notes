@@ -100,12 +100,17 @@ impl App {
             a.st.borrow_mut().settings.auto_notes = input("autoNotes").checked();
             a.save();
         });
+        listen(self, "webSearch", "change", |a, _: Event| {
+            a.st.borrow_mut().settings.web_search = input("webSearch").checked();
+            a.save();
+        });
         click(self, "settingsBtn", |a| {
             a.apply_settings_to_ui();
             a.fill_model_selects();
             let _ = dom::by_id::<HtmlDialogElement>("settingsDialog").show_modal();
         });
         listen(self, "settingsDialog", "close", |a, _: Event| a.read_settings_from_dialog());
+        listen(self, "setProvider", "change", |a, _: Event| a.provider_chosen());
         listen(self, "messages", "click", |a, ev: MouseEvent| {
             if let Some(link) = closest(ev.target(), "a[href]") {
                 if a.platform.is_desktop() && a.open_link(&link) {

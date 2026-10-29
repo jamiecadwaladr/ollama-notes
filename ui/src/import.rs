@@ -197,6 +197,7 @@ impl App {
         self.extracting.set(self.extracting.get() + 1);
         let (mut failed, mut created_total) = (0, 0);
         let think = self.extraction_think(&model).await;
+        let options = self.extraction_options(&model);
         for (i, section) in sections.iter().enumerate() {
             if abort.is_aborted() {
                 break;
@@ -214,10 +215,8 @@ impl App {
                 ChatMessage::new("system", DOC_EXTRACT_SYSTEM),
                 ChatMessage::new("user", extract::doc_prompt(&title, i + 1, sections.len(), &existing, section, max)),
             ];
-            let result = self
-                .ollama
-                .chat_json(&model, &messages, &extract::note_schema(), &extract::extract_options(), think, &abort)
-                .await;
+            let result =
+                self.ollama.chat_json(&model, &messages, &extract::note_schema(), &options, think, &abort).await;
             dom::clear_timeout(timer);
             match result {
                 Ok(v) => {

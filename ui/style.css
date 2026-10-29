@@ -30,7 +30,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .icon-btn:hover { color: var(--text); background: var(--bg3); }
 .link-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px 6px; font-size: 12px; border-radius: 6px; }
 .link-btn:hover { color: var(--accent); background: var(--accent-dim); }
-select, input[type=text], input[type=search], input[type=number], textarea {
+select, input[type=text], input[type=password], input[type=search], input[type=number], textarea {
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; outline: none;
 }
 select:focus, input:focus, textarea:focus { border-color: var(--accent); }
@@ -93,6 +93,12 @@ textarea { resize: vertical; }
 .thinking { margin-bottom: 8px; font-size: 12.5px; color: var(--muted); }
 .thinking summary { cursor: pointer; }
 .thinking > div { border-left: 2px solid var(--border); padding-left: 10px; margin-top: 4px; }
+.research { margin-bottom: 8px; font-size: 12.5px; color: var(--muted); }
+.research summary { cursor: pointer; }
+.research > ul { list-style: none; border-left: 2px solid var(--border); padding-left: 10px; margin: 4px 0 0; }
+.research > ul > li { margin: 4px 0; }
+.research ol { margin: 2px 0 0; padding-left: 20px; }
+.research-error { color: var(--danger); }
 .cursor { display: inline-block; width: 8px; height: 14px; background: var(--accent); animation: blink 1s steps(2) infinite; vertical-align: text-bottom; }
 @keyframes blink { 50% { opacity: 0; } }
 .msg-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }

@@ -8,7 +8,8 @@ fn escape_attr(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn is_web_link(url: &str) -> bool {
+/// Whether a link goes to a web page (http or https): the only links a reply may open.
+pub fn is_web_link(url: &str) -> bool {
     let u = url.trim_start().to_ascii_lowercase();
     u.starts_with("http://") || u.starts_with("https://")
 }

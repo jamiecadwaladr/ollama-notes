@@ -4,7 +4,7 @@
 //! defaults; a type mismatch must never make the whole file unreadable, because the next save would replace it.
 //! Fields this version doesn't know are kept in `extra` and written back unchanged.
 
-use crate::host::DEFAULT_OLLAMA_HOST;
+use crate::host::{DEFAULT_API_BASE, DEFAULT_OLLAMA_HOST};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -19,6 +19,15 @@ const EXPORT_KEYS: [&str; 3] = ["app", "version", "exportedAt"];
 /// The field's value, or its default when it has another type.
 fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
     Ok(serde_json::from_value(Value::deserialize(d)?).unwrap_or_default())
+}
+
+/// Where the models are: an Ollama server, or a cloud API that speaks OpenAI's chat completions protocol.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Ollama,
+    OpenAi,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +52,16 @@ pub struct Settings {
     /// Desktop app only; in browser mode the server decides.
     #[serde(deserialize_with = "lenient")]
     pub ollama_host: String,
+    #[serde(deserialize_with = "lenient")]
+    pub provider: Provider,
+    /// The cloud API, for `Provider::OpenAi`. Exports leave the key out.
+    #[serde(deserialize_with = "lenient")]
+    pub api_base: String,
+    #[serde(deserialize_with = "lenient")]
+    pub api_key: String,
+    /// Let Ollama models search the web and read pages before answering (`websearch`).
+    #[serde(deserialize_with = "lenient")]
+    pub web_search: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -59,6 +78,10 @@ impl Default for Settings {
             auto_fit: true,
             chat_width: 440.0,
             ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
+            provider: Provider::Ollama,
+            api_base: DEFAULT_API_BASE.to_string(),
+            api_key: String::new(),
+            web_search: true,
             extra: Extra::new(),
         }
     }
@@ -107,6 +130,9 @@ pub struct Message {
     pub node_ids: Option<Vec<String>>,
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The web searches and page reads behind a reply.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub research: Option<Vec<ResearchStep>>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -115,6 +141,49 @@ impl Message {
     pub fn is_streaming(&self) -> bool {
         self.streaming == Some(true)
     }
+}
+
+/// A web search or page read the model made while answering.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ResearchStep {
+    /// "search" or "fetch".
+    #[serde(deserialize_with = "lenient")]
+    pub tool: String,
+    /// The search query, or the page's address.
+    #[serde(deserialize_with = "lenient")]
+    pub input: String,
+    /// The results found, or the page read.
+    #[serde(deserialize_with = "lenient")]
+    pub links: Vec<WebLink>,
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Still running.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub pending: Option<bool>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl ResearchStep {
+    pub fn is_fetch(&self) -> bool {
+        self.tool == "fetch"
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending == Some(true)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebLink {
+    #[serde(deserialize_with = "lenient")]
+    pub title: String,
+    #[serde(deserialize_with = "lenient")]
+    pub url: String,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// Where a note came from: a chat message, or a section of an imported file.
@@ -361,12 +430,18 @@ impl AppState {
             if m.streaming.is_some() {
                 m.streaming = Some(false);
             }
+            for step in m.research.iter_mut().flatten() {
+                step.pending = None;
+            }
         }
     }
 
-    /// The export file's text: this state plus the export marker fields, pretty-printed.
+    /// The export file's text: this state plus the export marker fields, pretty-printed. The API key stays here.
     pub fn to_export(&self, exported_at: &str) -> String {
         let mut v = serde_json::to_value(self).unwrap_or(Value::Null);
+        if let Some(s) = v.get_mut("settings").and_then(Value::as_object_mut) {
+            s.remove("apiKey");
+        }
         if let Value::Object(m) = &mut v {
             let mut out = Extra::new();
             out.insert("app".into(), "ollama-notes".into());
@@ -439,10 +514,52 @@ mod tests {
     }
 
     #[test]
+    fn exports_leave_out_the_api_key_and_imports_keep_it() {
+        let mut state = AppState::default();
+        state.settings.provider = Provider::OpenAi;
+        state.settings.api_key = "sk-secret".into();
+        let text = state.to_export("t");
+        assert!(!text.contains("sk-secret"));
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["settings"]["provider"], "openai");
+        let back =
+            AppState::from_export(&format!("{{\"graph\":{{}},\"settings\":{}}}", v["settings"]), &state.settings);
+        assert_eq!(back.unwrap().settings.api_key, "sk-secret");
+    }
+
+    #[test]
+    fn unknown_providers_fall_back_to_ollama() {
+        let s: Settings = serde_json::from_str(r#"{"provider":"carrier-pigeon"}"#).unwrap();
+        assert_eq!(s.provider, Provider::Ollama);
+        let s: Settings = serde_json::from_str(r#"{"provider":"openai"}"#).unwrap();
+        assert_eq!((s.provider, s.api_base.as_str()), (Provider::OpenAi, DEFAULT_API_BASE));
+    }
+
+    #[test]
     fn saved_streaming_flags_are_cleared() {
         let s = AppState::from_saved(r#"{"chat":[{"id":"1","streaming":true},{"id":"2"}]}"#).unwrap();
         assert_eq!(s.chat[0].streaming, Some(false));
         assert_eq!(s.chat[1].streaming, None);
+    }
+
+    #[test]
+    fn web_search_is_on_unless_turned_off() {
+        assert!(AppState::from_saved("{}").unwrap().settings.web_search);
+        assert!(!AppState::from_saved(r#"{"settings":{"webSearch":false}}"#).unwrap().settings.web_search);
+    }
+
+    #[test]
+    fn research_steps_round_trip() {
+        let json = r#"{"chat":[{"id":"1","research":[{"tool":"search","input":"q","pending":true,"links":[{"title":"T","url":"https://x","rank":1}]},{"tool":"fetch","input":"https://y","error":"not found"}]}]}"#;
+        let s = AppState::from_saved(json).unwrap();
+        let steps = s.chat[0].research.as_deref().unwrap();
+        assert_eq!((steps[0].links[0].url.as_str(), steps[0].pending), ("https://x", None));
+        assert!(steps[1].is_fetch() && steps[1].error.is_some());
+        let back = serde_json::to_value(&s).unwrap();
+        assert_eq!(back["chat"][0]["research"][0]["links"][0]["rank"], 1);
+        assert!(back["chat"][0]["research"][0].get("pending").is_none());
+        let junk = AppState::from_saved(r#"{"chat":[{"id":"1","research":"x"}]}"#).unwrap();
+        assert_eq!(junk.chat[0].research, None);
     }
 
     #[test]

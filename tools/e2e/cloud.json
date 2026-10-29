@@ -1,0 +1,164 @@
+[
+ {
+  "name": "provider choices",
+  "js": "t.$('#settingsBtn').click(); return [...t.$('#setProvider').options].map(o => o.textContent)",
+  "expect": [
+   "Ollama",
+   "OpenAI",
+   "Anthropic",
+   "Google Gemini",
+   "OpenRouter",
+   "Groq",
+   "Mistral",
+   "DeepSeek",
+   "Together AI",
+   "xAI",
+   "Another OpenAI-compatible API"
+  ]
+ },
+ {
+  "name": "Ollama's fields by default (browser mode)",
+  "js": "return [t.$('#setProvider').value, t.$('#setHostRow').hidden, t.$('#setProxyNote').hidden, t.$('#setApiBaseRow').hidden, t.$('#setApiKeyRow').hidden]",
+  "expect": [
+   "ollama",
+   true,
+   false,
+   true,
+   true
+  ]
+ },
+ {
+  "name": "picking a service fills in its address",
+  "js": "const p = t.$('#setProvider'); p.value = 'https://api.openai.com/v1'; p.dispatchEvent(new Event('change')); return [t.$('#setApiBase').value, t.$('#setApiBaseRow').hidden, t.$('#setApiKeyRow').hidden, t.$('#setProxyNote').hidden, t.$('#setApiKey').type]",
+  "expect": [
+   "https://api.openai.com/v1",
+   false,
+   false,
+   true,
+   "password"
+  ]
+ },
+ {
+  "shot": "settings-cloud"
+ },
+ {
+  "name": "a wrong key shows the API's error",
+  "js": "const p = t.$('#setProvider'); p.value = 'other'; p.dispatchEvent(new Event('change')); t.$('#setApiBase').value = '127.0.0.1:18734/v1/chat/completions/'; t.$('#setApiKey').value = 'wrong-key'; t.$('#settingsDialog').close(); await t.until(() => t.$('#status .status-text').textContent === 'Not connected', 10000); await t.sleep(600); return [t.toast(), t.$('#status').title, t.state().settings.apiBase]",
+  "expect": [
+   "Incorrect API key provided",
+   "Incorrect API key provided",
+   "http://127.0.0.1:18734/v1"
+  ]
+ },
+ {
+  "name": "the right key lists the chat models",
+  "js": "t.$('#settingsBtn').click(); const r = [t.$('#setProvider').value, t.$('#setApiBase').value]; t.$('#setApiKey').value = 'test-key'; t.$('#settingsDialog').close(); await t.until(() => t.$('#status .status-text').textContent.includes('model'), 10000); await t.sleep(600); const s = t.state().settings; return [r, t.$('#status .status-text').textContent, [...t.$('#modelSelect').options].map(o => o.value), s.model, s.provider, s.apiKey]",
+  "expect": [
+   [
+    "other",
+    "http://127.0.0.1:18734/v1"
+   ],
+   "127.0.0.1 \u00b7 2 models",
+   [
+    "mock-chat",
+    "mock-reasoner"
+   ],
+   "mock-chat",
+   "openai",
+   "test-key"
+  ]
+ },
+ {
+  "name": "use the model that rejects parameters",
+  "js": "const s = t.$('#modelSelect'); s.value = 'mock-reasoner'; s.dispatchEvent(new Event('change')); await t.sleep(300); return t.state().settings.model",
+  "expect": "mock-reasoner"
+ },
+ {
+  "name": "chat streams a reply from the API",
+  "js": "t.$('#input').value = 'What is a Bloom filter?'; t.$('#composer').requestSubmit(); await t.until(() => !t.$('#stopBtn').hidden, 5000); await t.until(() => t.$('#stopBtn').hidden, 20000); await t.sleep(600); const s = t.state(); const m = s.chat[s.chat.length - 1]; const el = [...document.querySelectorAll('.msg.assistant .msg-body')].pop(); return [m.content, m.thinking, m.error || null, !!el.querySelector('strong')]",
+  "expect": [
+   "A **Bloom filter** is a probabilistic set.",
+   "Thinking about sets.",
+   null,
+   true
+  ]
+ },
+ {
+  "name": "notes extracted through the API",
+  "js": "await t.until(() => t.$('#extractStatus').textContent === '' && document.querySelectorAll('.node').length > 2, 20000); await t.sleep(300); const titles = [...document.querySelectorAll('.node .node-title')].map(n => n.textContent); return [titles.includes('Bloom filter'), titles.includes('False positive rate'), t.toast()]",
+  "expect": [
+   true,
+   true,
+   "3 notes added to the map"
+  ]
+ },
+ {
+  "shot": "after-cloud-chat"
+ },
+ {
+  "name": "the key is sent, and rejected parameters are dropped one at a time",
+  "js": "const log = await (await fetch('http://127.0.0.1:18734/log')).json(); return log.filter(r => r.path === '/v1/chat/completions').map(r => [r.auth, r.model, r.stream, r.temperature, r.format])",
+  "expect": [
+   [
+    "Bearer test-key",
+    "mock-reasoner",
+    true,
+    0.7,
+    null
+   ],
+   [
+    "Bearer test-key",
+    "mock-reasoner",
+    true,
+    null,
+    null
+   ],
+   [
+    "Bearer test-key",
+    "mock-reasoner",
+    false,
+    0.2,
+    "json_schema"
+   ],
+   [
+    "Bearer test-key",
+    "mock-reasoner",
+    false,
+    null,
+    "json_schema"
+   ],
+   [
+    "Bearer test-key",
+    "mock-reasoner",
+    false,
+    null,
+    "json_object"
+   ]
+  ]
+ },
+ {
+  "name": "settings survive a reload",
+  "reload": true
+ },
+ {
+  "name": "reconnects to the API after a reload",
+  "js": "await t.until(() => t.$('#status .status-text').textContent.includes('model'), 10000); return [t.$('#status .status-text').textContent, t.state().settings.model]",
+  "expect": [
+   "127.0.0.1 \u00b7 2 models",
+   "mock-reasoner"
+  ]
+ },
+ {
+  "name": "back to Ollama",
+  "js": "t.$('#settingsBtn').click(); const p = t.$('#setProvider'); p.value = 'ollama'; p.dispatchEvent(new Event('change')); const rows = [t.$('#setApiBaseRow').hidden, t.$('#setProxyNote').hidden]; t.$('#settingsDialog').close(); await t.until(() => !['connecting\u2026', '127.0.0.1 \u00b7 2 models'].includes(t.$('#status .status-text').textContent), 10000); await t.sleep(600); const s = t.state().settings; return [rows, s.provider, s.apiKey, t.$('#status .status-text').textContent.startsWith('Ollama')]",
+  "expect": [
+   [
+    true,
+    false
+   ],
+   "ollama",
+   "test-key",
+   true
+  ]
+ }
+]

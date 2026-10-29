@@ -19,6 +19,9 @@
     <label class="toggle" title="After each reply, ask the model to extract notes into the map">
       <input type="checkbox" id="autoNotes" checked><span>Auto-notes</span>
     </label>
+    <label class="toggle" id="webSearchToggle" title="Let the model search the web and read pages before it answers (Ollama's web search: run `ollama signin` once)">
+      <input type="checkbox" id="webSearch" checked><span>Web search</span>
+    </label>
   </div>
   <div class="topbar-right">
     <div id="status" class="status"><span class="dot"></span><span class="status-text">connecting…</span></div>
@@ -139,9 +142,20 @@
 <dialog id="settingsDialog">
   <form method="dialog" id="settingsForm">
     <h2>Settings</h2>
+    <label>Models from
+      <select id="setProvider"><option value="ollama">Ollama</option></select>
+    </label>
     <label id="setHostRow" hidden>Ollama server
       <input type="text" id="setHost" placeholder="http://127.0.0.1:11434" spellcheck="false" autocomplete="off">
       <span class="muted">Leave as is for Ollama on this Mac (it's started for you if it isn't running), or enter another machine's address.</span>
+    </label>
+    <label id="setApiBaseRow" hidden>API address
+      <input type="text" id="setApiBase" placeholder="https://api.openai.com/v1" spellcheck="false" autocomplete="off">
+      <span class="muted">Any service with an OpenAI-compatible chat completions API that accepts requests from web pages.</span>
+    </label>
+    <label id="setApiKeyRow" hidden>API key
+      <input type="password" id="setApiKey" spellcheck="false" autocomplete="off">
+      <span class="muted">Saved with your notes on this computer, and left out of exports. Messages, and the notes you add as context, are sent to this service.</span>
     </label>
     <label>Chat model
       <select id="setModel"></select>
