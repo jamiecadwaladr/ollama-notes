@@ -106,6 +106,7 @@ impl App {
             let _ = dom::by_id::<HtmlDialogElement>("settingsDialog").show_modal();
         });
         listen(self, "settingsDialog", "close", |a, _: Event| a.read_settings_from_dialog());
+        listen(self, "setProvider", "change", |a, _: Event| a.provider_chosen());
         listen(self, "messages", "click", |a, ev: MouseEvent| {
             if let Some(link) = closest(ev.target(), "a[href]") {
                 if a.platform.is_desktop() && a.open_link(&link) {

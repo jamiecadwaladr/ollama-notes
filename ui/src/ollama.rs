@@ -1,9 +1,11 @@
-//! Talking to Ollama from the page: same-origin /api in browser mode (the server proxies it), or the Ollama server
-//! itself in the desktop app (Ollama accepts requests from tauri:// pages by default). Aborting a request closes its
-//! connection, so Stop also stops generation on the server.
+//! Talking to the models from the page: same-origin /api in browser mode (the server proxies it), or the Ollama
+//! server itself in the desktop app (Ollama accepts requests from tauri:// pages by default); or, in both, a cloud
+//! API with an OpenAI-style /chat/completions, called directly with the key from Settings. Aborting a request closes
+//! its connection, so Stop also stops generation on the server.
 
 use crate::dom::{self, js_error, window};
 use notes_core::ollama::{self as api, ChatMessage, ChatStream, ModelInfo};
+use notes_core::openai;
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -70,8 +72,10 @@ impl std::fmt::Display for Error {
 
 #[derive(Default)]
 pub struct Ollama {
-    /// Where Ollama is ('' = this page's server).
+    /// Where Ollama is ('' = this page's server), or the cloud API's base URL.
     base: RefCell<String>,
+    /// The cloud API's key, or None for Ollama.
+    api_key: RefCell<Option<String>>,
     /// Capabilities per model; they can differ between servers, so changing the host clears it.
     caps: RefCell<HashMap<String, Vec<String>>>,
 }
@@ -88,30 +92,69 @@ impl Ollama {
         self.base.borrow().clone()
     }
 
-    pub fn set_host(&self, url: &str) {
+    /// Whether this talks to a cloud API rather than Ollama.
+    pub fn is_cloud(&self) -> bool {
+        self.api_key.borrow().is_some()
+    }
+
+    /// Points at an Ollama server (`api_key` None), or a cloud API.
+    pub fn set_host(&self, url: &str, api_key: Option<&str>) {
         *self.base.borrow_mut() = url.to_string();
+        *self.api_key.borrow_mut() = api_key.map(str::to_string);
         self.caps.borrow_mut().clear();
+    }
+
+    /// The path of an endpoint: Ollama's, or the cloud API's.
+    fn path(&self, ollama: &'static str, cloud: &'static str) -> &'static str {
+        if self.is_cloud() { cloud } else { ollama }
     }
 
     async fn request(&self, path: &str, body: Option<&Value>, abort: &Abort) -> Result<Response, Error> {
         let base = self.host();
         let init = RequestInit::new();
         init.set_signal(Some(&abort.ctl.signal()));
+        let headers = web_sys::Headers::new().map_err(|e| Error::Failed(js_error(&e)))?;
+        if let Some(key) = self.api_key.borrow().as_deref() {
+            for (name, value) in openai::headers(&base, key) {
+                let _ = headers.set(name, &value);
+            }
+        }
         if let Some(b) = body {
             init.set_method("POST");
-            let headers = web_sys::Headers::new().map_err(|e| Error::Failed(js_error(&e)))?;
             let _ = headers.set("Content-Type", "application/json");
-            init.set_headers(&headers);
             init.set_body(&JsValue::from_str(&b.to_string()));
         }
+        init.set_headers(&headers);
         let result = JsFuture::from(window().fetch_with_str_and_init(&format!("{base}{path}"), &init)).await;
         match result {
             Ok(r) => Ok(r.unchecked_into()),
             Err(_) if abort.is_aborted() => Err(Error::Aborted),
             Err(e) if base.is_empty() => Err(Error::Failed(js_error(&e))),
+            Err(_) if self.is_cloud() => Err(Error::Failed(format!(
+                "Cannot reach {base}. Check that you're online, and the API address in Settings."
+            ))),
             Err(_) => Err(Error::Failed(format!(
                 "Cannot reach Ollama at {base}. Start Ollama.app or run `ollama serve`, or change the server in Settings."
             ))),
+        }
+    }
+
+    /// POSTs `body`, retrying with the fallbacks for parameters the server or model rejects: for Ollama
+    /// `notes_core::ollama::json_fallback`, for a cloud API `notes_core::openai::fallback` after a 400.
+    async fn post(&self, path: &str, mut body: Value, abort: &Abort) -> Result<Response, Error> {
+        loop {
+            let r = self.request(path, Some(&body), abort).await?;
+            let next = if r.ok() {
+                None
+            } else if self.is_cloud() {
+                (r.status() == 400).then(|| openai::fallback(&body)).flatten()
+            } else {
+                api::json_fallback(&body)
+            };
+            match next {
+                Some(b) => body = b,
+                None => return Ok(r),
+            }
         }
     }
 
@@ -119,7 +162,8 @@ impl Ollama {
         if r.ok() { Ok(r) } else { Err(Error::Failed(api::error_text(r.status(), &text_of(&r).await))) }
     }
 
-    /// The pulled models, sorted by name. Gives up after 5 s, so an unroutable host doesn't hang the status.
+    /// The pulled models (or the cloud API's chat models), sorted by name. Gives up after 5 s, so an unroutable host
+    /// doesn't hang the status.
     pub async fn tags(&self) -> Result<Vec<ModelInfo>, Error> {
         let abort = Abort::new();
         let timer = {
@@ -127,8 +171,10 @@ impl Ollama {
             dom::set_timeout(5000, move || a.abort(AbortReason::Timeout))
         };
         let result = async {
-            let r = Self::check(self.request("/api/tags", None, &abort).await?).await?;
-            api::parse_tags(&text_of(&r).await).map_err(|e| Error::Failed(e.to_string()))
+            let r = Self::check(self.request(self.path("/api/tags", "/models"), None, &abort).await?).await?;
+            let text = text_of(&r).await;
+            let models = if self.is_cloud() { openai::parse_models(&text) } else { api::parse_tags(&text) };
+            models.map_err(|e| Error::Failed(e.to_string()))
         }
         .await;
         dom::clear_timeout(timer);
@@ -138,8 +184,11 @@ impl Ollama {
         })
     }
 
-    /// A model's capabilities (e.g. completion, thinking, tools), cached per model name.
+    /// A model's capabilities (e.g. completion, thinking, tools), cached per model name. Cloud APIs don't say.
     pub async fn capabilities(&self, model: &str) -> Vec<String> {
+        if self.is_cloud() {
+            return Vec::new();
+        }
         if let Some(c) = self.caps.borrow().get(model) {
             return c.clone();
         }
@@ -152,7 +201,7 @@ impl Ollama {
         caps
     }
 
-    /// Streams /api/chat. `on_chunk` sees the reply so far each time a line arrives.
+    /// Streams /api/chat (or /chat/completions). `on_chunk` sees the reply so far each time a line arrives.
     pub async fn chat_stream(
         &self,
         model: &str,
@@ -161,9 +210,12 @@ impl Ollama {
         abort: &Abort,
         mut on_chunk: impl FnMut(&ChatStream),
     ) -> Result<ChatStream, Error> {
-        let body = api::chat_stream_body(model, messages, temperature);
-        let r = Self::check(self.request("/api/chat", Some(&body), abort).await?).await?;
-        let mut stream = ChatStream::default();
+        let (body, mut stream) = if self.is_cloud() {
+            (openai::chat_stream_body(model, messages, temperature), ChatStream::sse())
+        } else {
+            (api::chat_stream_body(model, messages, temperature), ChatStream::default())
+        };
+        let r = Self::check(self.post(self.path("/api/chat", "/chat/completions"), body, abort).await?).await?;
         let Some(body) = r.body() else { return Ok(stream) };
         let reader: ReadableStreamDefaultReader = body.get_reader().unchecked_into();
         let failed = |e: JsValue| if abort.is_aborted() { Error::Aborted } else { Error::Failed(js_error(&e)) };
@@ -185,8 +237,8 @@ impl Ollama {
         Ok(stream)
     }
 
-    /// A non-streamed call that asks for JSON, constrained by `schema`, with the fallbacks of
-    /// `notes_core::ollama::json_fallback` when the server rejects the request.
+    /// A non-streamed call that asks for JSON, constrained by `schema`, with fallbacks when the server rejects the
+    /// request (see `post`). A cloud API only takes the temperature from `options`.
     pub async fn chat_json(
         &self,
         model: &str,
@@ -196,22 +248,26 @@ impl Ollama {
         think: Option<bool>,
         abort: &Abort,
     ) -> Result<Value, Error> {
-        let mut body = api::chat_json_body(model, messages, Some(schema), options, think);
-        let mut r = self.request("/api/chat", Some(&body), abort).await?;
-        while !r.ok() {
-            let Some(next) = api::json_fallback(&body) else { break };
-            body = next;
-            r = self.request("/api/chat", Some(&body), abort).await?;
-        }
+        let body = if self.is_cloud() {
+            let temperature = options.get("temperature").and_then(Value::as_f64).unwrap_or(0.2);
+            openai::chat_json_body(model, messages, schema, temperature)
+        } else {
+            api::chat_json_body(model, messages, Some(schema), options, think)
+        };
+        let r = self.post(self.path("/api/chat", "/chat/completions"), body, abort).await?;
         let text = text_of(&Self::check(r).await?).await;
         if abort.is_aborted() {
             return Err(Error::Aborted);
         }
         let j: Value = serde_json::from_str(&text).map_err(|e| Error::Failed(e.to_string()))?;
         if let Some(e) = j.get("error").filter(|e| !e.is_null()) {
-            return Err(Error::Failed(e.as_str().map_or_else(|| e.to_string(), str::to_string)));
+            return Err(Error::Failed(api::error_message(e)));
         }
-        let content = j.pointer("/message/content").and_then(Value::as_str).unwrap_or("");
+        let content = if self.is_cloud() {
+            openai::reply_content(&j)
+        } else {
+            j.pointer("/message/content").and_then(Value::as_str).unwrap_or("")
+        };
         api::parse_loose_json(content).map_err(|e| Error::Failed(e.to_string()))
     }
 }

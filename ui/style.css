@@ -30,7 +30,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .icon-btn:hover { color: var(--text); background: var(--bg3); }
 .link-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px 6px; font-size: 12px; border-radius: 6px; }
 .link-btn:hover { color: var(--accent); background: var(--accent-dim); }
-select, input[type=text], input[type=search], input[type=number], textarea {
+select, input[type=text], input[type=password], input[type=search], input[type=number], textarea {
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; outline: none;
 }
 select:focus, input:focus, textarea:focus { border-color: var(--accent); }

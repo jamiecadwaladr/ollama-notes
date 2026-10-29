@@ -1,9 +1,11 @@
-//! The Ollama server address: normalizing what the user types in Settings, and telling whether it is this machine.
+//! The Ollama server and cloud API addresses: normalizing what the user types in Settings, and telling whether a
+//! server is this machine.
 
 use regex::Regex;
 use std::sync::LazyLock;
 
 pub const DEFAULT_OLLAMA_HOST: &str = "http://127.0.0.1:11434";
+pub const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
 
 static SCHEME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^[a-z][a-z0-9+.-]*://").unwrap());
 static PORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":[0-9]+$").unwrap());
@@ -19,6 +21,24 @@ pub fn normalize_host(s: &str) -> String {
         format!("http://{s}")
     } else {
         format!("http://{s}:11434")
+    }
+}
+
+/// "api.groq.com/openai/v1" -> "https://api.groq.com/openai/v1", but "localhost:1234/v1" (e.g. LM Studio) gets
+/// http://; a pasted endpoint loses its "/chat/completions" or "/models", as requests add those.
+pub fn normalize_api_base(s: &str) -> String {
+    let mut s = s.trim().trim_end_matches('/');
+    for endpoint in ["/chat/completions", "/models"] {
+        s = s.strip_suffix(endpoint).unwrap_or(s).trim_end_matches('/');
+    }
+    if s.is_empty() {
+        DEFAULT_API_BASE.to_string()
+    } else if SCHEME.is_match(s) {
+        s.to_string()
+    } else if is_local(&format!("http://{s}")) {
+        format!("http://{s}")
+    } else {
+        format!("https://{s}")
     }
 }
 
@@ -49,6 +69,15 @@ mod tests {
         assert_eq!(normalize_host("  localhost/ "), "http://localhost:11434");
         assert_eq!(normalize_host("box:8080"), "http://box:8080");
         assert_eq!(normalize_host("https://ollama.example///"), "https://ollama.example");
+    }
+
+    #[test]
+    fn normalizes_api_bases() {
+        assert_eq!(normalize_api_base(" "), DEFAULT_API_BASE);
+        assert_eq!(normalize_api_base("api.groq.com/openai/v1/"), "https://api.groq.com/openai/v1");
+        assert_eq!(normalize_api_base("https://api.openai.com/v1/chat/completions"), "https://api.openai.com/v1");
+        assert_eq!(normalize_api_base("http://localhost:1234/v1/models/"), "http://localhost:1234/v1");
+        assert_eq!(normalize_api_base("127.0.0.1:1234/v1"), "http://127.0.0.1:1234/v1");
     }
 
     #[test]

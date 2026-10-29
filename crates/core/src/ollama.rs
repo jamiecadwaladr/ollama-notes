@@ -40,8 +40,12 @@ pub fn parse_tags(body: &str) -> Result<Vec<ModelInfo>, serde_json::Error> {
         models: Vec<ModelInfo>,
     }
     let mut models = serde_json::from_str::<Tags>(body)?.models;
-    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)));
+    sort_by_name(&mut models);
     Ok(models)
+}
+
+pub(crate) fn sort_by_name(models: &mut [ModelInfo]) {
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)));
 }
 
 /// A model's capabilities from `/api/show` (e.g. completion, thinking, tools).
@@ -52,12 +56,20 @@ pub fn parse_capabilities(body: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// An `error` from a reply: Ollama's string, or the `message` of a cloud API's error object.
+pub fn error_message(e: &Value) -> String {
+    match e.as_str().or_else(|| e.get("message")?.as_str()) {
+        Some(m) => m.to_string(),
+        None => e.to_string(),
+    }
+}
+
 /// The text of an error reply: its JSON `error`, the body itself, or "HTTP <status>".
 pub fn error_text(status: u16, body: &str) -> String {
     match serde_json::from_str::<Value>(body) {
         Ok(v) => match v.get("error") {
             Some(Value::String(e)) if !e.is_empty() => e.clone(),
-            Some(e) if !e.is_null() && e != &Value::Bool(false) => e.to_string(),
+            Some(e) if !e.is_null() && e != &Value::Bool(false) => error_message(e),
             _ => body.to_string(),
         },
         Err(_) if body.is_empty() => format!("HTTP {status}"),
@@ -117,10 +129,12 @@ pub enum StreamError {
     Ollama(String),
 }
 
-/// Accumulates a streamed `/api/chat` reply from its NDJSON bytes.
+/// Accumulates a streamed chat reply from its bytes: Ollama's NDJSON from `/api/chat`, or the server-sent events of
+/// a cloud API's `/chat/completions`.
 #[derive(Debug, Default)]
 pub struct ChatStream {
     buf: Vec<u8>,
+    sse: bool,
     pub content: String,
     pub thinking: String,
     /// The final line (with timing stats) once the reply is done.
@@ -128,6 +142,11 @@ pub struct ChatStream {
 }
 
 impl ChatStream {
+    /// A stream of server-sent events (`data: {…}` lines, then `data: [DONE]`) from a chat completions API.
+    pub fn sse() -> ChatStream {
+        ChatStream { sse: true, ..ChatStream::default() }
+    }
+
     /// Feeds bytes as they arrive. Returns whether any line was read, so the caller knows to repaint.
     pub fn push(&mut self, bytes: &[u8]) -> Result<bool, StreamError> {
         self.buf.extend_from_slice(bytes);
@@ -135,19 +154,33 @@ impl ChatStream {
         while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=nl).collect();
             let line = String::from_utf8_lossy(&line);
-            let line = line.trim();
+            let mut line = line.trim();
+            if self.sse {
+                // event names, ids and comments carry nothing
+                let Some(data) = line.strip_prefix("data:") else { continue };
+                line = data.trim_start();
+                if line == "[DONE]" {
+                    self.done = Some(json!({ "done": true }));
+                    return Ok(true);
+                }
+            }
             if line.is_empty() {
                 continue;
             }
             let Ok(j) = serde_json::from_str::<Value>(line) else { continue };
             if let Some(e) = j.get("error").filter(|e| !e.is_null()) {
-                return Err(StreamError::Ollama(e.as_str().map_or_else(|| e.to_string(), str::to_string)));
+                return Err(StreamError::Ollama(error_message(e)));
             }
-            if let Some(m) = j.get("message") {
+            let message = if self.sse { j.pointer("/choices/0/delta") } else { j.get("message") };
+            if let Some(m) = message {
                 if let Some(c) = m.get("content").and_then(Value::as_str) {
                     self.content.push_str(c);
                 }
-                if let Some(t) = m.get("thinking").and_then(Value::as_str) {
+                // Ollama's "thinking"; "reasoning_content" (DeepSeek) or "reasoning" (OpenRouter, Groq) in a delta
+                if let Some(t) = ["thinking", "reasoning_content", "reasoning"]
+                    .iter()
+                    .find_map(|k| m.get(*k).and_then(Value::as_str))
+                {
                     self.thinking.push_str(t);
                 }
             }
@@ -227,6 +260,20 @@ mod tests {
     }
 
     #[test]
+    fn streams_server_sent_events() {
+        let mut s = ChatStream::sse();
+        let reply = ": keep-alive\r\nevent: x\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning\":\"hm\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hé\"}}]}\ndata:{\"choices\":[{\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n";
+        let bytes = reply.as_bytes();
+        assert!(!s.push(&bytes[..30]).unwrap());
+        assert!(s.push(&bytes[30..]).unwrap());
+        assert_eq!((s.content.as_str(), s.thinking.as_str()), ("Héllo", "hm"));
+        assert!(s.is_done());
+        let mut s = ChatStream::sse();
+        let err = s.push(b"data: {\"error\":{\"message\":\"Rate limit reached\",\"code\":429}}\n");
+        assert_eq!(err, Err(StreamError::Ollama("Rate limit reached".into())));
+    }
+
+    #[test]
     fn stream_errors_and_junk_lines() {
         let mut s = ChatStream::default();
         assert!(!s.push(b"not json\n").unwrap());
@@ -239,6 +286,11 @@ mod tests {
         assert_eq!(error_text(500, ""), "HTTP 500");
         assert_eq!(error_text(500, "boom"), "boom");
         assert_eq!(error_text(400, r#"{"other":1}"#), r#"{"other":1}"#);
+        assert_eq!(
+            error_text(401, r#"{"error":{"message":"Incorrect API key provided","code":null}}"#),
+            "Incorrect API key provided"
+        );
+        assert_eq!(error_text(400, r#"{"error":{"code":7}}"#), r#"{"code":7}"#);
     }
 
     #[test]

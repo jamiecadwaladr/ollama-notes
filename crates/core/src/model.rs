@@ -4,7 +4,7 @@
 //! defaults; a type mismatch must never make the whole file unreadable, because the next save would replace it.
 //! Fields this version doesn't know are kept in `extra` and written back unchanged.
 
-use crate::host::DEFAULT_OLLAMA_HOST;
+use crate::host::{DEFAULT_API_BASE, DEFAULT_OLLAMA_HOST};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -19,6 +19,15 @@ const EXPORT_KEYS: [&str; 3] = ["app", "version", "exportedAt"];
 /// The field's value, or its default when it has another type.
 fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
     Ok(serde_json::from_value(Value::deserialize(d)?).unwrap_or_default())
+}
+
+/// Where the models are: an Ollama server, or a cloud API that speaks OpenAI's chat completions protocol.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Ollama,
+    OpenAi,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +52,13 @@ pub struct Settings {
     /// Desktop app only; in browser mode the server decides.
     #[serde(deserialize_with = "lenient")]
     pub ollama_host: String,
+    #[serde(deserialize_with = "lenient")]
+    pub provider: Provider,
+    /// The cloud API, for `Provider::OpenAi`. Exports leave the key out.
+    #[serde(deserialize_with = "lenient")]
+    pub api_base: String,
+    #[serde(deserialize_with = "lenient")]
+    pub api_key: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -59,6 +75,9 @@ impl Default for Settings {
             auto_fit: true,
             chat_width: 440.0,
             ollama_host: DEFAULT_OLLAMA_HOST.to_string(),
+            provider: Provider::Ollama,
+            api_base: DEFAULT_API_BASE.to_string(),
+            api_key: String::new(),
             extra: Extra::new(),
         }
     }
@@ -364,9 +383,12 @@ impl AppState {
         }
     }
 
-    /// The export file's text: this state plus the export marker fields, pretty-printed.
+    /// The export file's text: this state plus the export marker fields, pretty-printed. The API key stays here.
     pub fn to_export(&self, exported_at: &str) -> String {
         let mut v = serde_json::to_value(self).unwrap_or(Value::Null);
+        if let Some(s) = v.get_mut("settings").and_then(Value::as_object_mut) {
+            s.remove("apiKey");
+        }
         if let Value::Object(m) = &mut v {
             let mut out = Extra::new();
             out.insert("app".into(), "ollama-notes".into());
@@ -436,6 +458,28 @@ mod tests {
         assert_eq!(v["app"], "ollama-notes");
         assert_eq!(v.as_object().unwrap().keys().next().unwrap(), "app");
         assert!(text.contains("\n  \"version\": 1"));
+    }
+
+    #[test]
+    fn exports_leave_out_the_api_key_and_imports_keep_it() {
+        let mut state = AppState::default();
+        state.settings.provider = Provider::OpenAi;
+        state.settings.api_key = "sk-secret".into();
+        let text = state.to_export("t");
+        assert!(!text.contains("sk-secret"));
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["settings"]["provider"], "openai");
+        let back =
+            AppState::from_export(&format!("{{\"graph\":{{}},\"settings\":{}}}", v["settings"]), &state.settings);
+        assert_eq!(back.unwrap().settings.api_key, "sk-secret");
+    }
+
+    #[test]
+    fn unknown_providers_fall_back_to_ollama() {
+        let s: Settings = serde_json::from_str(r#"{"provider":"carrier-pigeon"}"#).unwrap();
+        assert_eq!(s.provider, Provider::Ollama);
+        let s: Settings = serde_json::from_str(r#"{"provider":"openai"}"#).unwrap();
+        assert_eq!((s.provider, s.api_base.as_str()), (Provider::OpenAi, DEFAULT_API_BASE));
     }
 
     #[test]

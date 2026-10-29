@@ -1,8 +1,8 @@
 # Ollama Notes
 
-A Mac app for chatting with a locally hosted [Ollama](https://ollama.com) model, with a node-based notes map that
-fills itself in as you talk. Native window, menu bar and file panels. Written in Rust: a Tauri desktop shell around a
-page compiled to WebAssembly.
+A Mac app for chatting with a locally hosted [Ollama](https://ollama.com) model (or a cloud model, with your API key),
+with a node-based notes map that fills itself in as you talk. Native window, menu bar and file panels. Written in
+Rust: a Tauri desktop shell around a page compiled to WebAssembly.
 
 ## Build and run
 
@@ -25,6 +25,19 @@ copy it to another Mac, right-click it and choose **Open** the first time.
 The app talks to Ollama at `http://127.0.0.1:11434`. If Ollama isn't running there when the app starts, it opens
 Ollama.app (or runs `ollama serve`) and connects once it's up. For Ollama on another machine, change
 **Settings › Ollama server**. You need at least one model pulled, e.g. `ollama pull llama3.2`.
+
+### Cloud models
+
+To use models from a cloud service instead, pick it in **Settings › Models from** and paste an API key. The list has
+OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, Mistral, DeepSeek, Together AI and xAI; **Another
+OpenAI-compatible API** takes any address that serves `/models` and `/chat/completions` and accepts requests from web
+pages (CORS), such as LM Studio at `localhost:1234/v1`. The page calls the service directly, so your messages and any
+pinned notes go to it. The key is saved with your settings in `notes.json` (or the browser's storage) and is left out
+of exports. Ollama's own cloud models don't need a key here: run `ollama signin` and pull one, and it shows up under
+Ollama.
+
+Thinking is shown when the service streams it (DeepSeek, OpenRouter, Groq). If a model rejects the temperature or the
+note-extraction JSON schema, the request is retried without it.
 
 ### Your data
 
@@ -114,17 +127,19 @@ crates/core/                  logic shared by everything, no I/O: tested with ca
   graph.rs  layout.rs  view.rs  the notes map, its force layout, pan/zoom maths
   keywords.rs                   TF-IDF keywords and keyword links
   extract.rs  ollama.rs         note extraction prompts and merging; the Ollama API as data
+  openai.rs                     cloud APIs (OpenAI-style chat completions) as data
   text.rs  markdown.rs          sectioning, file names, PDF text; safe Markdown (pulldown-cmark)
 crates/native/                the data file (with its per-session backup) and starting Ollama
 ui/                           the page: index.html, style.css, src/*.rs, vendored pdf.js (+ js/pdf_shim.js)
   app.rs chat.rs import.rs      state and saving, the conversation, importing documents
   graph_view.rs inspector.rs    the map on screen, the inspector and popovers
-  platform.rs ollama.rs         app vs browser differences; talking to Ollama
+  platform.rs ollama.rs         app vs browser differences; talking to Ollama or a cloud API
 src-tauri/                    the desktop app: window, menu bar, commands for the page, quitting
 server/                       browser mode: serves ui/dist, proxies /api/* to Ollama
 tools/make-icon/              draws the app icon (scripts/icons.sh makes src-tauri/icons from it)
 tools/golden/                 regenerates the tests that compare crates/core with the original JS
-tools/e2e/                    drives the page in headless Chrome against the server (tools/e2e/smoke.json)
+tools/e2e/                    drives the page in headless Chrome against the server (tools/e2e/smoke.json;
+                              cloud.json against the stand-in API in mock_openai.py)
 scripts/check.sh              the quality gate: fmt, clippy (native and wasm32), tests
 ```
 
